@@ -1,4 +1,6 @@
-This folder contains the code that collects, combines, and cleans the data. The data source includes data provided by Jensen, Kelly and Pedersen (2023) which they used for their paper as cited below:
+This folder contains the code that collects, combines, and cleans the data. The codes for each step are availabe in separate .py files and are numbered. Moreover, for consistency, the path in which the stock characteristics are first saved is called XXZZ (in 1- Combine csv batches per country.py). In the codes of the following steps, same path pattern is utilized.
+
+The data source includes data provided by Jensen, Kelly and Pedersen (2023) which they used for their paper as cited below:
 
 @article{JensenKellyPedersen2023,
 	author = {Jensen, Theis Ingerslev and Kelly, Bryan and Pedersen, Lasse Heje},
