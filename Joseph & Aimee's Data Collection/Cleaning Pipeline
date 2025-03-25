@@ -1,0 +1,631 @@
+!pip install wrds
+
+import wrds
+import pandas as pd
+import numpy as np
+from scipy.stats.mstats import winsorize
+import matplotlib.pyplot as plt
+
+
+# Connect to WRDS
+print("Connecting to WRDS...")
+wrds_db = wrds.Connection()
+print("Connected to WRDS successfully!")
+
+# Downloading and extracting list of countries
+print("Downloading list of countries...")
+countries = pd.read_excel('https://github.com/bkelly-lab/ReplicationCrisis/raw/master/GlobalFactors/Country%20Classification.xlsx')
+countries_list = countries['excntry'].tolist()
+print(f"Found {len(countries_list)} countries: {countries_list}")
+
+# Downloading and extracting list of characteristics
+print("Downloading list of characteristics...")
+chars = pd.read_excel('https://github.com/bkelly-lab/ReplicationCrisis/raw/master/GlobalFactors/Factor%20Details.xlsx')
+chars_rel = chars[chars['abr_jkp'].notna()]['abr_jkp'].tolist()
+print(f"Found {len(chars_rel)} characteristics to download.")
+
+
+relevant_chars = {"id":"id", "eom":"date", "excntry":"country", "gvkey":"gvkey",
+                  "permno":"permno", "crsp_exchcd":"crsp_exch_code",
+                  "comp_exchg":"comp_exch_code",
+                  "me":"me", "sic":"sic", "ff49":"ff49",
+                  "taccruals_at":"absacc", "oaccruals_at":"acc", "at_gr1":"agr",
+                  "be_me":"bm", "cash_at":"cash_ass", "debt_at":"debt_ass",
+                  "fcf_me":"cfp", "ret_6_0":"mom_6m", "ebit_sale":"pm",
+                  "dolvol":"dolvol", "div12m_me":"dy", "be_gr1a":"egr",
+                  "ni_me":"ep", "ami_126d":"ill", "ret_12_1":"mom_12m",
+                  "at_be":"lev", "debtlt_gr1a":"lgr", "rmax1_21d":"maxret",
+                  "ret_1_0":"rev_1m", "ret_6_1":"mom_6m_lag",
+                  "taccruals_ni":"pctacc", "rvol_21d":"retvol", "ni_be":"roe",
+                  "sale_gr1":"sgr", "sales":"sales", "prc":"price",
+                  "turnover_126d":"turn"
+                  }
+
+rel_chars = []
+
+for i in relevant_chars:
+    rel_chars.append(i)
+
+def convert_date_format(df):
+  df = df.copy()
+  df['eom'] = pd.to_datetime(df['eom'], format='%Y-%m-%d')
+  return df
+
+def calculate_monthly_returns(df):
+    """Calculate monthly returns for each stock"""
+    # Sort the data, ensuring chronological order for each stock:
+    df = df.sort_values(by=['id', 'eom'])
+
+    # Group by stock ID and calculate percent change in price:
+    df['monthly_return'] = df.groupby('id')['prc'].pct_change()
+
+    return df
+
+def create_single_exchange_col(df):
+    """Harmonize the exchange numbers between crsp and compustat. Priority
+    goes to crsp, then secondary is compustat."""
+    df = df.copy()
+    df['exchange'] = df['crsp_exchcd'].combine_first(df['comp_exchg'])
+
+    return df
+
+def winsorize_column(
+    df,
+    value_col,
+    group_cols=['eom', 'excntry', 'exchange'],
+    output_col=None,
+    limits=[0.025, 0.025],
+    add_flag=True,
+    plot=True,
+    xlim=(-1, 1),
+    bins=1000
+):
+    """
+    Winsorizes a column within groups and optionally visualizes the result.
+
+    Parameters:
+    - df: pandas DataFrame
+    - value_col: column to winsorize (e.g., 'monthly_return')
+    - group_cols: list of columns to group by (e.g., ['eom', 'excntry', 'exchange'])
+    - output_col: name of the winsorized column (default: value_col + '_winsorized')
+    - limits: lower and upper percentiles for winsorization (default: [0.025, 0.025])
+    - add_flag: whether to create a boolean flag column for winsorized rows
+    - plot: whether to plot the histogram comparison
+    - xlim: x-axis limits for histogram
+    - bins: number of histogram bins
+
+    Returns:
+    - DataFrame with new winsorized column and optional flag
+    """
+
+    if output_col is None:
+        output_col = f'{value_col}_winsorized'
+
+    # Define the core winsorization logic
+    def winsorize_series(x):
+        if x.dropna().empty:
+            return x
+        mask = x.notna()
+        x_wins = x.copy()
+        x_wins[mask] = winsorize(x[mask].to_numpy(), limits=limits)
+        return x_wins
+
+    # Apply within group
+    df = df.copy()
+    df[output_col] = df.groupby(group_cols)[value_col].transform(winsorize_series)
+
+    # Optionally add a flag
+    if add_flag:
+        df[f'{output_col}_flag'] = df[value_col] != df[output_col]
+
+    # Optionally visualize
+    if plot:
+        plt.hist(df[value_col], bins=bins, alpha=0.5, label='Original',
+                 color='red')
+        plt.hist(df[output_col], bins=bins, alpha=0.5, label='Winsorized',
+                 color='yellow')
+        plt.xlim(xlim)
+        plt.legend()
+        plt.title(f'{value_col}: Before & After Winsorization')
+        plt.show()
+
+    return df
+
+def filter_extreme_return_reversals(
+    df,
+    return_col='monthly_return',
+    id_col='id',
+    date_col='eom',
+    lag_threshold=3.0,
+    combo_threshold=0.5
+):
+    """
+    Filters out extreme two-month return reversals by setting both Rt and Rt-1 to NaN.
+
+    Parameters:
+    - df: pandas DataFrame
+    - return_col: column containing returns (default: 'monthly_return')
+    - id_col: stock identifier column (default: 'id')
+    - date_col: date column (default: 'eom')
+    - lag_threshold: threshold for lagged return (Rt-1) to trigger filter (default: 3.0 = 300%)
+    - combo_threshold: threshold for two-month combined return (default: 0.5 = 50%)
+
+    Returns:
+    - DataFrame with modified returns and intermediate columns removed
+    """
+    df = df.sort_values(by=[id_col, date_col]).copy()
+
+    # Lagged return
+    df['ret_lag'] = df.groupby(id_col)[return_col].shift(1)
+
+    # Combined two-month return
+    df['combo_return'] = (1 + df[return_col]) * (1 + df['ret_lag']) - 1
+
+    # Outlier condition
+    condition = (df['ret_lag'] > lag_threshold) & (df['combo_return'] < combo_threshold)
+
+    # Set Rt to NaN
+    df.loc[condition, return_col] = np.nan
+
+    # Set Rt-1 to NaN (shifted condition by -1 within group)
+    condition_prev = condition.groupby(df[id_col]).shift(-1)
+    df.loc[condition_prev, return_col] = np.nan
+
+    # Clean up
+    df = df.drop(columns=['ret_lag', 'combo_return'])
+
+    return df
+
+# To convert return to missing if return == 0:
+
+def convert_zero_return_to_missing(df, return_col='returns_winsorized'):
+  df = df.copy()
+  df.loc[df['returns_winsorized'] == 0, 'returns_winsorized'] = np.nan
+
+  return df
+
+# Let's rename to our paper variable names:
+def rename_vars(df, rename_dict):
+    """
+    Renames columns in a DataFrame using a rename dictionary,
+    but only if the columns actually exist in the DataFrame.
+
+    Parameters:
+    - df: pandas DataFrame
+    - rename_dict: dictionary of {old_name: new_name}
+
+    Returns:
+    - A DataFrame with renamed columns
+    """
+    # Only include keys in relevant_chars that match existing columns:
+    existing_cols = df.columns
+    rename_map = {col: new_name for col, new_name in rename_dict.items() if col in existing_cols}
+    df = df.rename(columns=rename_map)
+
+    return df
+
+# Thought: Define a function which will industry-adjust by passing it the name
+# of the column to be industry-adjusted:
+def industry_adjust(
+    df,
+    col_to_adjust,
+    output_col='indadj',
+    industry_col='ff49',
+    country_col='country',
+    date_col='date',
+    local=True,
+    drop_singletons=False):
+    """
+    Creates an industry-adjusted version of a firm characteristic column.
+
+    Parameters:
+    - df: DataFrame to operate on
+    - col_to_adjust: column name to adjust (e.g., 'bm')
+    - output_col: name of the new adjusted column (default: 'indadj')
+    - industry_col: column indicating industry grouping
+    - country_col: column indicating country
+    - date_col: column indicating time (monthly)
+    - local: if True, group by country + industry; if False, industry only
+    - drop_singletons: if True, set adjusted values to NaN for single-firm groups
+    """
+
+    df = df.copy()
+
+    # Define grouping columns
+    if local:
+        group_cols = [date_col, country_col, industry_col]
+    else:
+        group_cols = [date_col, industry_col]
+
+    # Compute group mean and size
+    group = df.groupby(group_cols)[col_to_adjust]
+    group_mean = group.transform('mean')
+    group_size = group.transform('count')
+
+    # Calculate industry-adjusted value
+    df[output_col] = df[col_to_adjust] - group_mean
+
+    # Optionally drop singletons
+    if drop_singletons:
+        df.loc[group_size <= 1, output_col] = np.nan
+
+    return df
+
+def replace_zero_bm_ia_with_missing(df, bm_ia_col='bm_ia', bm_col='bm'):
+    """
+    Replaces zero values in the industry-adjusted book-to-market column (bm_ia)
+    with NaN if the associated raw bm value is missing.
+
+    Parameters:
+    - df: pandas DataFrame
+    - bm_ia_col: name of the industry-adjusted bm column (default: 'bm_ia')
+    - bm_col: name of the raw book-to-market column (default: 'bm')
+
+    Returns:
+    - Modified DataFrame with updated bm_ia column
+    """
+    df = df.copy()
+    condition = (df[bm_col].isna()) & (df[bm_ia_col] == 0)
+    df.loc[condition, bm_ia_col] = np.nan
+    return df
+
+
+def construct_cf_d(df):
+
+  df["cashdebt"] = df["cash_ass"]/df["debt_ass"]
+
+  return df
+
+def construct_delta(df, col, new_col=None, group_col='id'):
+    """
+    Computes month-to-month change in a characteristic for each stock (or group).
+
+    Parameters:
+    - df: pandas DataFrame
+    - col: column to compute the delta on (e.g., 'mom_6m')
+    - new_col: optional name for the output column. If None, uses 'delta_{col}'
+    - group_col: column to group by before differencing (default: 'id')
+
+    Returns:
+    - Modified DataFrame with a new column for the delta
+    """
+    if new_col is None:
+        new_col = f'delta_{col}'
+
+    df[new_col] = df.groupby(group_col)[col].diff()
+
+    return df
+
+def construct_industry_mean(
+    df,
+    col,
+    output_col='industry_mean',
+    date_col='date',
+    country_col='country',
+    industry_col='ff49',
+    firm_id_col='id',
+    exclude_self=False,
+    drop_singletons=False,
+    local=True
+):
+    """
+    Calculate industry-level equal-weighted average of a given column.
+
+    Parameters:
+    - df: pandas DataFrame
+    - col: name of the firm-level column to average (e.g., 'mom_12m')
+    - output_col: name for the new column with the industry average
+    - date_col: date column (e.g., 'date')
+    - country_col: country column (e.g., 'country')
+    - industry_col: industry grouping column (e.g., 'industry')
+    - firm_id_col: firm identifier column (e.g., 'id')
+    - exclude_self: if True, exclude the firm itself from the group average
+    - drop_singletons: if True, set value to NaN if group size is 1
+    - local: if True, group by country + industry + date; else by industry + date
+    """
+    df = df.copy()
+
+    # Set grouping columns
+    if local:
+        group_cols = [date_col, country_col, industry_col]
+    else:
+        group_cols = [date_col, industry_col]
+
+    # Helper function to exclude self from group mean
+    def group_mean_exclude_self(x):
+        if len(x) <= 1:
+            return pd.Series([np.nan] * len(x), index=x.index)
+        return (x.sum() - x) / (len(x) - 1)
+
+    # Compute the group mean
+    if exclude_self:
+        df[output_col] = (
+            df.groupby(group_cols)[col]
+            .transform(group_mean_exclude_self)
+        )
+    else:
+        df[output_col] = (
+            df.groupby(group_cols)[col]
+            .transform('mean')
+        )
+
+    # Optionally drop groups with size 1
+    if drop_singletons:
+        group_size = df.groupby(group_cols)[col].transform('count')
+        df.loc[group_size <= 1, output_col] = np.nan
+
+    return df
+
+def construct_rolling_std(
+    df,
+    col,
+    output_col=None,
+    id_col='id',
+    date_col='date',
+    window=12,
+    min_periods=6
+):
+    """
+    Computes rolling standard deviation (volatility) of a column for each stock over time.
+
+    Parameters:
+    - df: pandas DataFrame
+    - col: column to compute the rolling std on (e.g., 'dolvol')
+    - output_col: name of the new column (default: 'std_{col}')
+    - id_col: stock identifier column (default: 'id')
+    - date_col: date column (default: 'date')
+    - window: rolling window size (default: 12)
+    - min_periods: minimum required observations to compute std (default: 6)
+
+    Returns:
+    - Modified DataFrame with new volatility column
+    """
+    if output_col is None:
+        output_col = f'std{col}'
+
+    df = df.sort_values(by=[id_col, date_col]).copy()
+
+    df[output_col] = (
+        df.groupby(id_col)[col]
+        .transform(lambda x: x.rolling(window=window, min_periods=min_periods).std())
+    )
+
+    return df
+
+def construct_log_me(df):
+  df = df.copy()
+  df["mvel1"] = np.log(df["me"])
+
+  return df
+
+def construct_sp(df):
+  df = df.copy()
+  df["sp"] = (df["sales"]/df["price"])
+
+  return df
+
+def drop_misc_cols(df, cols=None):
+  df = df.copy()
+
+  columns = ['sales', 'monthly_return', 'was_winsorized', 'chpm']
+
+  if cols:
+    columns.extend(cols)
+
+  for column in columns:
+    if column in df.columns:
+      df.drop(columns=column, inplace=True)
+
+  return df
+
+def filter_valid_countries(
+    df,
+    id_col='id',
+    date_col='date',
+    country_col='country',
+    return_col='returns_winsorized',
+    core_vars=['bm', 'me', 'price', 'ff49', 'dy', 'mom_6m', 'mom_12m',
+               'pctacc', 'acc', 'agr', 'cash_ass', 'debt_ass', 'turn',
+               'maxret', 'pm'],
+    min_months=36,
+    min_stocks=100,
+    return_dropped=False
+):
+    """
+    Filters the dataset to keep only countries with a sufficient number of valid stocks.
+
+    A valid stock must:
+    - Have at least `min_months` of valid return data
+    - Have at least one valid core variable (alongside the return) in those months
+
+    Parameters:
+    - df: pandas DataFrame
+    - id_col: firm identifier
+    - date_col: time column (e.g., 'date')
+    - country_col: country identifier column
+    - return_col: return column (must be present)
+    - core_vars: list of core characteristic columns (only one required per row)
+    - min_months: minimum number of months of valid data required per stock (default: 36)
+    - min_stocks: minimum number of valid stocks per country (default: 100)
+    - return_dropped: if True, also return a list of dropped countries
+
+    Returns:
+    - Filtered DataFrame (and optionally a list of dropped countries)
+    """
+    df = df.copy()
+
+    # Row is valid if it has a return and at least one core characteristic
+    core_data_available = df[core_vars].notna().any(axis=1)
+    return_available = df[return_col].notna()
+    df['valid_obs'] = return_available & core_data_available
+
+    # Count valid months per stock
+    valid_months_per_stock = (
+        df[df['valid_obs']]
+        .groupby(id_col)[date_col]
+        .nunique()
+    )
+
+    # Keep stocks with sufficient history
+    valid_stocks = valid_months_per_stock[valid_months_per_stock >= min_months].index
+
+    # Count how many valid stocks per country
+    valid_countries = (
+        df[df[id_col].isin(valid_stocks)]
+        .groupby(country_col)[id_col]
+        .nunique()
+    )
+
+    # Keep countries with ≥ min_stocks
+    countries_to_keep = valid_countries[valid_countries >= min_stocks].index
+
+    # Identify dropped countries
+    all_countries = df[country_col].dropna().unique()
+    dropped_countries = sorted(set(all_countries) - set(countries_to_keep))
+
+    print(f"Dropped countries (did not meet {min_stocks} stocks with ≥{min_months} months of data):")
+    print(dropped_countries)
+
+    # Filter the full dataset
+    df = df[df[country_col].isin(countries_to_keep)]
+
+    # Drop helper column
+    df = df.drop(columns='valid_obs')
+
+    if return_dropped:
+        return df, dropped_countries
+    else:
+        return df
+
+def normalize_characteristics(
+    df,
+    cols_to_normalize=None,
+    group_cols=['date', 'country'],
+    suffix='_z',
+    exclude_cols=['id', 'date', 'country', 'returns_winsorized', 'gvkey',
+                  'permno', 'crsp_exch_code', 'comp_exch_code', 'sic', 'ff49']
+):
+    """
+    Normalizes specified columns (or all except excluded ones) to mean 0 and std 1 within each group.
+
+    Parameters:
+    - df: pandas DataFrame
+    - cols_to_normalize: list of columns to normalize. If None, uses all except exclude_cols.
+    - group_cols: columns to group by before normalizing (default: ['date', 'country'])
+    - suffix: suffix to append to normalized column names (default: '_z')
+    - exclude_cols: columns to exclude from automatic normalization selection
+
+    Returns:
+    - DataFrame with new normalized columns added
+    """
+    df = df.copy()
+
+    # Filter to numeric but not boolean columns:
+    if cols_to_normalize is None:
+        cols_to_normalize = [
+            col for col in df.columns
+            if (
+                col not in exclude_cols and
+                pd.api.types.is_numeric_dtype(df[col]) and
+                not pd.api.types.is_bool_dtype(df[col])
+            )
+        ]
+
+    for col in cols_to_normalize:
+        normalized_col = f'{col}{suffix}'
+        df[normalized_col] = (
+            df
+            .groupby(group_cols)[col]
+            .transform(lambda x: (x - x.mean()) / x.std())
+        )
+
+    return df
+
+
+def run_cleaning_pipeline(df, relevant_chars=relevant_chars):
+    """
+    Runs the full cleaning and transformation pipeline on a given DataFrame.
+
+    Parameters:
+    - df: Input pandas DataFrame with required raw columns
+    - relevant_chars: Dictionary of variable renaming {old_name: new_name}
+
+    Returns:
+    - Cleaned and transformed DataFrame
+    """
+
+    # The following order must be preserved! If anything extra must be added in
+    # ENSURE that everything will match with previous calls and future calls,
+    # e.g., variable/column names, etc.
+
+    # ALL DATA CLEANING & TRANSFORMATIONS:
+
+    # Basic data cleaning:
+
+    # Convert date format:
+    df = convert_date_format(df)
+
+    # Calculate monthly returns using price:
+    df = calculate_monthly_returns(df)
+
+    # Harmonize exchange columns between crsp and compustat:
+    df = create_single_exchange_col(df)
+
+    # Winsorize monthly returns per exchange per month:
+    df = winsorize_column(df, 'monthly_return',
+                          output_col='returns_winsorized', plot=True)
+
+    # Set extreme return reversals to missing:
+    df = filter_extreme_return_reversals(df)
+
+    # Convert "zero" returns to missing:
+    df = convert_zero_return_to_missing(df)
+
+    # Rename variables:
+    df = rename_vars(df, relevant_chars)  # Highly important positionally
+
+    # Construct cashflow to debt variable:
+    df = construct_cf_d(df)
+
+    # Construct delta variables using diff():
+    df = construct_delta(df, "mom_6m", "chmom_6m")
+    df = construct_delta(df, "pm", "chpm")
+
+    # Construct industry-adjusted variables:
+    df = industry_adjust(df, "bm", output_col="bm_ia")
+    df = industry_adjust(df, "cfp", output_col="cfp_ia")
+    df = industry_adjust(df, "me", output_col="mve_ia")
+    df = industry_adjust(df, "chpm", output_col="chpm_ia")
+
+    # Replace '0' values in bm_ia with missing, if there is no associated bm:
+    df = replace_zero_bm_ia_with_missing(df)
+
+    # Creating equal-weighted industry-level variable(s):
+    df = construct_industry_mean(df, "mom_12m", output_col="indmom_a_12m")
+
+    # Creating rolling volatility variable(s):
+    df = construct_rolling_std(df, "dolvol", output_col="stddolvol")
+    df = construct_rolling_std(df, "turn", output_col="stdturn")
+
+    # Creating log of me:
+    df = construct_log_me(df)
+
+    # Create sales to price:
+    df = construct_sp(df)
+
+    # Drop misc/intermediate columns:
+    df = drop_misc_cols(df)
+
+    # Filter to keep markets with only 100 stocks with 3 non-consecutive years
+    # of observations of return and at least one of the 'core vars':
+    df, _ = filter_valid_countries(df, return_dropped=True)
+
+    # Normalization of all stock characteristics per month, per country. This
+    # does NOT touch stock returns. It normalizes all to zero mean and unit
+    # standard deviation.
+    df = normalize_characteristics(df)
+
+    # Reset index before returning
+    df = df.reset_index(drop=True)
+
+    return df
