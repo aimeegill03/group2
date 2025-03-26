@@ -1,0 +1,155 @@
+# Installing
+!pip install wrds
+!pip install import_ipynb
+
+# Importing
+import wrds
+import pandas as pd
+import os
+# import import_ipynb
+import glob
+# from "/content/drive/MyDrive/Colab Notebooks/project_code.ipynb" import run_cleaning_pipeline
+# Green does not work for Aimee. Can try on Joseph's computer later
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Connect to WRDS
+wrds_db = wrds.Connection()
+print("Connected to WRDS successfully!")
+
+# Downloading and extracting list of countries
+print("Downloading list of countries...")
+countries = pd.read_excel('https://github.com/bkelly-lab/ReplicationCrisis/raw/master/GlobalFactors/Country%20Classification.xlsx')
+countries_list = countries['excntry'].tolist()
+print(f"Found {len(countries_list)} countries: {countries_list}")
+
+relevant_chars = {"id":"id", "eom":"date", "excntry":"country", "gvkey":"gvkey",
+                  "permno":"permno", "crsp_exchcd":"crsp_exch_code",
+                  "comp_exchg":"comp_exch_code",
+                  "me":"me", "sic":"sic", "ff49":"ff49",
+                  "taccruals_at":"absacc", "oaccruals_at":"acc", "at_gr1":"agr",
+                  "be_me":"bm", "cash_at":"cash_ass", "debt_at":"debt_ass",
+                  "fcf_me":"cfp", "ret_6_0":"mom_6m", "ebit_sale":"pm",
+                  "dolvol":"dolvol", "div12m_me":"dy", "be_gr1a":"egr",
+                  "ni_me":"ep", "ami_126d":"ill", "ret_12_1":"mom_12m",
+                  "at_be":"lev", "debtlt_gr1a":"lgr", "rmax1_21d":"maxret",
+                  "ret_1_0":"rev_1m", "ret_6_1":"mom_6m_lag",
+                  "taccruals_ni":"pctacc", "rvol_21d":"retvol", "ni_be":"roe",
+                  "sale_gr1":"sgr", "sales":"sales", "prc":"price",
+                  "turnover_126d":"turn"
+                  }
+rel_chars = []
+
+for i in relevant_chars:
+    rel_chars.append(i)
+
+# Downloading the data
+def download_wrds_data(
+    countries_list,
+    rel_chars,
+    wrds_db,
+    batch_size=400000,
+    save_csv=True,
+    file_path="/content/drive/MyDrive/Countries"
+):
+    """
+    Downloads WRDS data in batches for each country and returns a combined DataFrame.
+    Each country is removed from the list after it is fully processed.
+
+    Parameters:
+    - countries_list: List of country codes to download (e.g., ['USA', 'GBR', 'FRA'])
+    - rel_chars: List of relevant WRDS variable names (e.g., ['bm', 'me', 'ep'])
+    - wrds_db: Active WRDS connection object
+    - batch_size: Number of rows to download per batch (default: 400,000).
+    - save_csv: If True, saves each batch as a CSV file named "{country}_batch_{n}.csv"
+    - file_path: Directory path where CSVs will be saved
+
+    Returns:
+    - full_df: Combined DataFrame of all downloaded data
+    - remaining_countries: List of countries that were not processed (empty if successful)
+    """
+
+    all_data = []
+    remaining_countries = countries_list.copy()
+
+    print("Starting WRDS batch download")
+    print(f"Batch size set to {batch_size:,} rows per batch.\n")
+
+    os.makedirs(file_path, exist_ok=True)
+
+    for country in countries_list.copy():
+        print(f"\nProcessing country: {country}")
+        offset = 0
+
+        try:
+            while True:
+                print(f"Downloading batch {offset // batch_size + 1} (offset {offset}) for {country}...")
+
+                sql_query = f"""
+                SELECT {', '.join(rel_chars)}
+                FROM contrib.global_factor
+                WHERE common=1 AND exch_main=1 AND primary_sec=1 AND obs_main=1
+                  AND excntry = '{country}'
+                LIMIT {batch_size} OFFSET {offset}
+                """
+
+                data = wrds_db.raw_sql(sql_query)
+                print(f"Retrieved {data.shape[0]} rows, {data.shape[1]} columns")
+
+                if data.empty:
+                    print(f"🏁 Finished downloading data for {country}.")
+                    break
+
+                # Save to CSV
+                if save_csv:
+                    filename = f"{country}_batch_{offset // batch_size}.csv"
+                    file_path_with_filename = os.path.join(file_path, filename)
+                    print(f"Saving batch to {file_path_with_filename}")
+                    data.to_csv(file_path_with_filename, index=False)
+
+                all_data.append(data)
+                offset += batch_size
+
+        except Exception as e:
+            print(f"ERROR while processing {country}: {e}")
+            continue
+
+        # Remove processed country
+        remaining_countries.remove(country)
+
+    print("\nAll countries processed successfully.")
+    print(f"Combining {len(all_data)} batches into final DataFrame...")
+
+    if all_data:
+        full_df = pd.concat(all_data, ignore_index=True)
+        print(f"Final full_df shape: {full_df.shape}")
+    else:
+        full_df = pd.DataFrame()
+        print("No data was collected!")
+
+    return full_df, remaining_countries
+
+df, remaining_countries = download_wrds_data(countries_list, rel_chars, wrds_db,
+                                             batch_size=100000)
+
+# As the retrieval of data crashes before I can merge together, this function
+# combines all the batches
+
+def write_combined_csv_in_chunks(folder_path, output_path):
+    all_files = glob.glob(os.path.join(folder_path, "*.csv"))
+    print(f"Writing {len(all_files)} files into {output_path}...")
+
+    first_file = True
+    for f in all_files:
+        df = pd.read_csv(f)
+        print(f"Appending {f} with {df.shape[0]} rows...")
+
+        df.to_csv(output_path, mode='a', index=False, header=first_file)
+        first_file = False  # this means it only writes the header once
+
+    print("Done writing combined CSV!")
+
+# Preview of the merged CSVs
+df_preview = pd.read_csv("/content/drive/MyDrive/Countries/full_dataset.csv", nrows=10)
+print(df_preview)
