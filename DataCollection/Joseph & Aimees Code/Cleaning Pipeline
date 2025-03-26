@@ -1,29 +1,7 @@
-!pip install wrds
-
-import wrds
 import pandas as pd
 import numpy as np
 from scipy.stats.mstats import winsorize
 import matplotlib.pyplot as plt
-
-
-# Connect to WRDS
-print("Connecting to WRDS...")
-wrds_db = wrds.Connection()
-print("Connected to WRDS successfully!")
-
-# Downloading and extracting list of countries
-print("Downloading list of countries...")
-countries = pd.read_excel('https://github.com/bkelly-lab/ReplicationCrisis/raw/master/GlobalFactors/Country%20Classification.xlsx')
-countries_list = countries['excntry'].tolist()
-print(f"Found {len(countries_list)} countries: {countries_list}")
-
-# Downloading and extracting list of characteristics
-print("Downloading list of characteristics...")
-chars = pd.read_excel('https://github.com/bkelly-lab/ReplicationCrisis/raw/master/GlobalFactors/Factor%20Details.xlsx')
-chars_rel = chars[chars['abr_jkp'].notna()]['abr_jkp'].tolist()
-print(f"Found {len(chars_rel)} characteristics to download.")
-
 
 relevant_chars = {"id":"id", "eom":"date", "excntry":"country", "gvkey":"gvkey",
                   "permno":"permno", "crsp_exchcd":"crsp_exch_code",
