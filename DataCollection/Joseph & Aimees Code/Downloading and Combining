@@ -153,3 +153,82 @@ def write_combined_csv_in_chunks(folder_path, output_path):
 # Preview of the merged CSVs
 df_preview = pd.read_csv("/content/drive/MyDrive/Countries/full_dataset.csv", nrows=10)
 print(df_preview)
+
+
+# Let's have another option rather than combining every single csv. Instead,
+# let's combine by country with one final csv for each country:
+def extract_batch_number(filename):
+    """Extract batch number from filename like 'IRL_batch_12.csv' → 12"""
+    match = re.search(r'_batch_(\d+)\.csv$', filename)
+    return int(match.group(1)) if match else -1  # put unsorted ones at the end
+
+def write_country_csvs_by_batch(folder_path, output_folder):
+    # Get all csv files
+    all_files = glob.glob(os.path.join(folder_path, "*.csv"))
+
+    # Group files by country code (first 3 letters of filename)
+    country_files = defaultdict(list)
+    for f in all_files:
+        basename = os.path.basename(f)
+        country_code = basename[:3]
+        country_files[country_code].append(f)
+
+    print(f"Found {len(country_files)} countries...")
+
+    # Create output directory if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    for country, file_list in country_files.items():
+        # Sort files by batch number
+        sorted_files = sorted(file_list, key=lambda f: extract_batch_number(os.path.basename(f)))
+
+        # Combine all batches
+        combined_df = pd.concat([pd.read_csv(f) for f in sorted_files], ignore_index=True)
+        output_file = os.path.join(output_folder, f"{country}.csv")
+        combined_df.to_csv(output_file, index=False)
+
+        print(f"Saved {output_file} with {combined_df.shape[0]} rows from {len(sorted_files)} batch file(s)")
+
+    print("Done writing per-country CSVs!")
+
+
+write_country_csvs_by_batch(
+    folder_path="/content/drive/MyDrive/Colab Notebooks/Countries",
+    output_folder="/content/drive/MyDrive/Colab Notebooks/Countries"
+)
+
+# Define function to take each country csv, read it to a df and clean it.
+
+def clean_each_country_file(input_folder, output_folder,
+                            cleaning_function=run_cleaning_pipeline):
+    """
+    Loads each country CSV, applies cleaning function, saves cleaned version.
+
+    Parameters:
+    - input_folder: path to country_combined CSVs (e.g., 'IRL_combined.csv')
+    - output_folder: path to save cleaned versions
+    - cleaning_function: a function like run_cleaning_pipeline(df) -> df_cleaned
+    """
+
+    # Create output folder if not exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Loop over each country file
+    for filename in os.listdir(input_folder):
+        if filename.endswith(".csv"):
+            country = filename[:3]
+            filepath = os.path.join(input_folder, filename)
+            print(f"Reading {filename}...")
+
+            df = pd.read_csv(filepath)
+
+            print(f"Cleaning {country} data...")
+            df_cleaned = cleaning_function(df)
+
+            out_path = os.path.join(output_folder, f"{country}_cleaned.csv")
+            df_cleaned.to_csv(out_path, index=False)
+
+            print(f"Saved cleaned data for {country} ({df_cleaned.shape[0]} rows)")
+
+    print("All country files cleaned and saved.")
+
