@@ -111,7 +111,7 @@ def winsorize_column(
 
 def filter_extreme_return_reversals(
     df,
-    return_col='monthly_return',
+    return_col='returns_winsorized',
     id_col='id',
     date_col='eom',
     lag_threshold=3.0,
@@ -119,17 +119,6 @@ def filter_extreme_return_reversals(
 ):
     """
     Filters out extreme two-month return reversals by setting both Rt and Rt-1 to NaN.
-
-    Parameters:
-    - df: pandas DataFrame
-    - return_col: column containing returns (default: 'monthly_return')
-    - id_col: stock identifier column (default: 'id')
-    - date_col: date column (default: 'eom')
-    - lag_threshold: threshold for lagged return (Rt-1) to trigger filter (default: 3.0 = 300%)
-    - combo_threshold: threshold for two-month combined return (default: 0.5 = 50%)
-
-    Returns:
-    - DataFrame with modified returns and intermediate columns removed
     """
     df = df.sort_values(by=[id_col, date_col]).copy()
 
@@ -141,12 +130,13 @@ def filter_extreme_return_reversals(
 
     # Outlier condition
     condition = (df['ret_lag'] > lag_threshold) & (df['combo_return'] < combo_threshold)
+    condition = condition.fillna(False)  # Handle NaNs safely
 
     # Set Rt to NaN
     df.loc[condition, return_col] = np.nan
 
-    # Set Rt-1 to NaN (shifted condition by -1 within group)
-    condition_prev = condition.groupby(df[id_col]).shift(-1)
+    # Shifted condition to set Rt-1 to NaN
+    condition_prev = condition.groupby(df[id_col]).shift(-1).fillna(False)
     df.loc[condition_prev, return_col] = np.nan
 
     # Clean up
