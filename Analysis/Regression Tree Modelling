@@ -82,11 +82,3 @@ def run_boosting_annual_retraining_validation(X, y,
         t += test_size
 
     return results
-
-def load_country_data(csv_path, feature_cols, target_col):
-    df = pd.read_csv(csv_path).dropna()
-    df = df.sort_values('date')
-    X = df[feature_cols].values
-    y = df[target_col].values
-    return X, y
-
