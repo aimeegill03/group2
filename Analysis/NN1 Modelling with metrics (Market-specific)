@@ -1,0 +1,555 @@
+#----------------- Installing --------------------
+# If needed:
+# !pip install pandas numpy torch scikit-learn
+
+
+#----------------- Importing --------------------
+import os
+import pandas as pd
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import mean_squared_error
+from datetime import datetime
+import matplotlib.pyplot as plt
+
+
+#----------------- modifiables --------------------
+TARGET = "returns_winsorized"
+
+Estimator = 1 # Number of repeating NN model
+NN1_HIDDEN_SIZE = 32 #1 hidden layer with 32 neurons
+patience = 5 #Stop early if the model doesn't improve after this number of iteration
+epochs = 100 #fixed like paper
+batch_size = 10000 #fixed like paper
+lr = 0.01 #fixed like paper
+fixed_lambda = 1e-4 #(Penalty Lambda1)
+DATA_DIR = "./countries_cleaned"
+OUTPUT_DIR = "./results"
+
+
+#-----------------------------------------------------------#
+#------------------ per_country_function ------- NN1 -------#
+#-----------------------------------------------------------#
+
+############# Function with fixed Lambda
+def run_country_model(csv_path, output_dir, hidden_size=NN1_HIDDEN_SIZE, patience=patience, epochs=epochs, weight_decay=fixed_lambda):
+    PREDICTORS = [
+        "me_z", "absacc_z", "acc_z", "agr_z", "bm_z", "cash_ass_z", "debt_ass_z", "cfp_z", "mom_6m_z", "pm_z",
+        "dolvol_z", "dy_z", "egr_z", "ep_z", "ill_z", "mom_12m_z", "lev_z", "lgr_z", "maxret_z", "rev_1m_z",
+        "mom_6m_lag_z", "pctacc_z", "retvol_z", "roe_z", "sgr_z", "turn_z", "cashdebt_z",
+        "chmom_6m_z", "bm_ia_z", "cfp_ia_z", "mve_ia_z", "chpm_ia_z", "indmom_a_12m_z", "stddolvol_z",
+        "stdturn_z", "mvel1_z", "sp_z"
+    ]
+
+
+
+    #----------------- Preprocessing --------------------
+    df = pd.read_csv(csv_path)
+    country = df['country'].iloc[0]
+    #country_out = output_dir
+    country_out = os.path.join(OUTPUT_DIR, f"{country}_results")
+    os.makedirs(country_out, exist_ok=True)
+
+    df['date'] = pd.to_datetime(df['date'])  ## Let pandas auto-detect
+    df.sort_values(['id', 'date'], inplace=True)
+
+    # Create next month's return (shifted target)
+
+
+    df['returns_next_month'] = df.groupby('id')[TARGET].shift(-1)
+
+    # Optional: Fill/impute missing predictor values
+    df[PREDICTORS] = df[PREDICTORS].fillna(0) # or use mean/median
+
+    # Drop only rows where prediction is not possible
+    df.dropna(subset=PREDICTORS + ['returns_next_month'], inplace=True)
+
+    # Add year column for splitting
+    df['year'] = df['date'].dt.year
+
+   # Diagnostics
+    print(" Data shape after cleaning:", df.shape)
+    print(" Year range:", df['year'].min(), "-", df['year'].max())
+
+    df['date'] = pd.to_datetime(df['date'])  # ensures correct format
+    df['year'] = df['date'].dt.year
+    years = sorted(df['year'].unique())
+    total_years = len(years)
+    VALIDATION_YEARS  = max(1, int(total_years * 0.2)) # 20% of available years, at least 1
+
+    print(f" Validation window for {country}: {VALIDATION_YEARS} years out of {total_years}")
+
+    #----------------- Model Definition --------------------
+    class NN1(nn.Module):
+        def __init__(self, input_dim):
+            super().__init__()
+            self.model = nn.Sequential(
+                nn.Linear(input_dim, NN1_HIDDEN_SIZE),
+                nn.BatchNorm1d(NN1_HIDDEN_SIZE),
+                nn.ReLU(),
+                nn.Linear(NN1_HIDDEN_SIZE, 1)
+            )
+
+        def forward(self, x):
+            return self.model(x)
+
+    #----------------- Training Function --------------------
+    def r2_score(y_true, y_pred):
+        ss_res = np.sum((y_true - y_pred)**2)
+        ss_tot = np.sum(y_true**2)  # Not centered, to match the paper
+        return 1 - ss_res / ss_tot
+
+    def train_model(X_train, y_train, X_val, y_val, X_test, y_test, lr=lr, batch_size=batch_size, epochs=epochs, patience=patience):
+        model = NN1(X_train.shape[1])
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=fixed_lambda)
+        criterion = nn.MSELoss()
+
+        best_model = None
+        best_val_loss = np.inf
+        patience_counter = 0
+
+        # Track losses and R2
+        train_mse_hist, val_mse_hist, test_mse_hist = [], [], []
+        train_r2_hist, val_r2_hist, test_r2_hist = [], [], []
+
+        # Tensors
+        X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+        X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
+        y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
+        X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+        y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+
+        train_loader = DataLoader(TensorDataset(X_train_tensor, y_train_tensor), batch_size=batch_size, shuffle=True)
+
+        for epoch in range(epochs):
+            model.train()
+            for xb, yb in train_loader:
+                optimizer.zero_grad()
+                preds = model(xb).squeeze()
+                loss = criterion(preds, yb)
+                loss.backward()
+                optimizer.step()
+
+            # Eval on all 3 sets
+            model.eval()
+            with torch.no_grad():
+                train_pred = model(X_train_tensor).squeeze().numpy()
+                val_pred = model(X_val_tensor).squeeze().numpy()
+                test_pred = model(X_test_tensor).squeeze().numpy()
+
+                train_mse = mean_squared_error(y_train, train_pred)
+                val_mse = mean_squared_error(y_val, val_pred)
+                test_mse = mean_squared_error(y_test, test_pred)
+
+                train_r2 = r2_score(y_train, train_pred)
+                val_r2 = r2_score(y_val, val_pred)
+                test_r2 = r2_score(y_test, test_pred)
+
+            train_mse_hist.append(train_mse)
+            val_mse_hist.append(val_mse)
+            test_mse_hist.append(test_mse)
+
+            train_r2_hist.append(train_r2)
+            val_r2_hist.append(val_r2)
+            test_r2_hist.append(test_r2)
+
+            if val_mse < best_val_loss:
+                best_val_loss = val_mse
+                best_model = model.state_dict()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+
+        # Reload best model
+        model.load_state_dict(best_model)
+
+        return model, (train_mse_hist, val_mse_hist, test_mse_hist), (train_r2_hist, val_r2_hist, test_r2_hist)
+
+
+
+############# Expanding for testing, metrics, graphs, etc
+
+    #----------------- Expanding Window Loop --------------------
+
+    results = []
+    metrics_list = []
+
+
+    df['year'] = df['date'].dt.year
+    years = sorted(df['year'].unique())
+    initial_train_years = int(len(years) * 0.3)
+    train_start = years[0]
+
+    for test_start_idx in range(initial_train_years + VALIDATION_YEARS, len(years)):
+        train_end_year = years[test_start_idx - VALIDATION_YEARS - 1]
+        val_start_year = years[test_start_idx - VALIDATION_YEARS]
+        val_end_year = years[test_start_idx - 1]
+        test_year = years[test_start_idx]
+
+        print(f"Training: <= {train_end_year}, Validation: {val_start_year}-{val_end_year}, Testing: {test_year}")
+
+        train_data = df[df['year'] <= train_end_year]
+        val_data = df[(df['year'] >= val_start_year) & (df['year'] <= val_end_year)]
+        test_data = df[df['year'] == test_year]
+
+        if train_data.empty or val_data.empty or test_data.empty:
+            continue
+
+        X_train, y_train = train_data[PREDICTORS].values, train_data['returns_next_month'].values
+        X_val, y_val = val_data[PREDICTORS].values, val_data['returns_next_month'].values
+        X_test = test_data[PREDICTORS].values
+        y_test = test_data['returns_next_month'].values
+
+
+        # Train model with MSE & R² tracking
+        model, mse_hist, r2_hist = train_model(X_train, y_train, X_val, y_val, X_test, y_test)
+
+        # Save final values for CSV
+        year_metrics = {
+            "year": test_year,
+            "train_mse": mse_hist[0][-1],
+            "val_mse": mse_hist[1][-1],
+            "test_mse": mse_hist[2][-1],
+            "train_r2": r2_hist[0][-1],
+            "val_r2": r2_hist[1][-1],
+            "test_r2": r2_hist[2][-1],
+            "best_epoch": len(mse_hist[0])
+        }
+        metrics_list.append(year_metrics)
+
+
+        # -------- Plotting MSE and R² per epoch --------
+        # MSE plot
+        plt.figure()
+        plt.plot(mse_hist[0], label="Train")
+        plt.plot(mse_hist[1], label="Validation")
+        plt.plot(mse_hist[2], label="Test")
+        plt.yscale("log")
+        plt.xlabel("Epoch")
+        plt.ylabel("Mean Squared Error")
+        plt.title(f"MSE per Epoch ({test_year})")
+        plt.legend()
+        plt.grid()
+        plt.savefig(os.path.join(country_out, f"mse_plot_{test_year}.png"))
+        plt.close()
+
+        # R² plot
+        plt.figure()
+        plt.plot(r2_hist[0], label="Train")
+        plt.plot(r2_hist[1], label="Validation")
+        plt.plot(r2_hist[2], label="Test")
+        plt.xlabel("Epoch")
+        plt.ylabel("R²")
+        plt.title(f"R² per Epoch ({test_year})")
+        plt.legend()
+        plt.grid()
+        plt.savefig(os.path.join(country_out, f"r2_plot_{test_year}.png"))
+        plt.close()
+
+        # -------- Predict on test set --------
+        model.eval()
+        with torch.no_grad():
+            preds = model(torch.tensor(X_test, dtype=torch.float32)).squeeze().numpy()
+
+        test_data = test_data.copy()
+        test_data['nn1_pred'] = preds
+        results.append(test_data[['id', 'date', 'nn1_pred', 'returns_next_month']])
+
+
+    #-------------------------------------------------------------------#
+    #----------- Metrics for the country (Calculate and Save) ----------#
+    if results:
+        final_df = pd.concat(results)
+
+        # Save predictions (needed for calculating metrics)
+        # Per stock
+        final_df.to_csv(os.path.join(country_out, f"{country}_predictions.csv"), index=False)
+        print(" Saved predictions to nn1_predictions.csv")
+
+        # Save per-year performance
+        perform_df = pd.DataFrame(metrics_list)
+        perform_df.to_csv(os.path.join(country_out, f"{country}_performance_metrics.csv"), index=False)
+        print(f" Saved per-year metrics to {country}_performance_metrics.csv")
+
+        # Summary metrics
+        from scipy.stats import spearmanr
+        metrics_dict = {}
+
+        ##----------- Metric 1: Out-of-Sample R² (OOR²) ---------
+        # Final Global R² for the Country, once all test-year predictions are concatenated:
+        y_true = final_df['returns_next_month'].values
+        y_pred = final_df['nn1_pred'].values
+        metrics_dict['oor2'] = 1 - np.sum((y_true - y_pred) ** 2) / np.sum(y_true ** 2)
+        print(f" Out-of-Sample R²: {metrics_dict['oor2']:.5f}")
+
+
+        ##----------- Metric 2: Annualized Sharpe Ratio ---------
+        #(ranked based on predicted returns, calculated for same portfolio of actual stocks)
+        long_short_returns = []
+        for date, group in final_df.groupby('date'):
+            group = group.sort_values('nn1_pred')
+            n = len(group)
+            if n < 10: continue
+            decile = n // 10
+            top = group.iloc[-decile:]
+            bottom = group.iloc[:decile]
+            long_short_returns.append(top['returns_next_month'].mean() - bottom['returns_next_month'].mean())
+
+        metrics_dict['sharpe_ratio'] = np.mean(long_short_returns) / np.std(long_short_returns) * np.sqrt(12)
+        print(f" Annualized Sharpe Ratio: {metrics_dict['sharpe_ratio']:.5f}")
+
+
+        ##---------- Metric 3: Monthly Rank Correlation ---------
+        rank_corrs = []
+        for date, group in final_df.groupby('date'):
+            if group['returns_next_month'].nunique() < 2: continue
+            rho, _ = spearmanr(group['nn1_pred'], group['returns_next_month'])
+            rank_corrs.append(rho)
+
+        metrics_dict['avg_rank_correlation'] = np.nanmean(rank_corrs)
+        print(f" Average Monthly Rank Correlation: {np.nanmean(rank_corrs):.5f}")
+
+
+        ##---------- Metric 4: Decile Score Distance ---------
+        decile_spreads = []
+        for date, group in final_df.groupby('date'):
+            group = group.sort_values('nn1_pred')
+            n = len(group)
+            if n < 10: continue
+            decile = n // 10
+            top = group.iloc[-decile:]
+            bottom = group.iloc[:decile]
+            decile_spreads.append(top['returns_next_month'].mean() - bottom['returns_next_month'].mean())
+
+        metrics_dict['avg_decile_score_distance'] = np.mean(decile_spreads)
+        print(f" Average Decile Score Distance: {np.mean(decile_spreads):.5f}")
+
+        # Save summary
+        metrics_dict['country'] = country
+        summary_df = pd.DataFrame([metrics_dict])
+        summary_df.to_csv(os.path.join(country_out, f"{country}_summary_metrics.csv"), index=False)
+        print(f" Saved summary metrics to {country}_summary_metrics.csv")
+
+    else:
+        print(f" Skipping {country}: No test results available (possibly insufficient data or other filter)")
+
+
+
+
+############# Function with Tuning Lambda
+from collections import defaultdict
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+
+def find_best_lambda_for_country(
+    df, predictors,
+    hidden_size, lr, batch_size, epochs, patience,
+    lambda_grid=[1e-5, 1e-4, 1e-3]
+):
+    """
+    Matches paper logic: expanding training set, 1-year rolling validation set,
+    average R² across validation years to select best lambda.
+    """
+
+    # Step 1: Preprocess
+    df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    df[predictors] = df[predictors].fillna(0)
+    df.dropna(subset=predictors + ['returns_next_month'], inplace=True)
+    df['year'] = df['date'].dt.year
+    years = sorted(df['year'].unique())
+    total_years = len(years)
+
+    # Step 2: Define initial train/val periods
+    train_years = int(total_years * 0.3)
+    val_years = max(1, int(total_years * 0.2))
+
+    initial_train_end = years[train_years - 1]
+    final_val_year = years[train_years + val_years - 1]
+
+    print(f" Tuning λ₁ using:")
+    print(f"   • Initial Train ≤ {initial_train_end}")
+    print(f"   • Shrinking Validation from {years[train_years]} to {final_val_year}")
+    print(f"   • Grid: {lambda_grid}\n")
+
+    # Store validation R²s for each lambda
+    lambda_r2s = defaultdict(list)
+
+    # Step 3: Shrinking validation years
+    for val_year in years[train_years : train_years + val_years]:
+        train = df[df['year'] < val_year]
+        val = df[df['year'] == val_year]
+
+        if train.empty or val.empty:
+            continue
+
+        X_train, y_train = train[predictors].values, train['returns_next_month'].values
+        X_val, y_val = val[predictors].values, val['returns_next_month'].values
+
+        print(f" Validating on {val_year} | Train ≤ {val_year - 1}")
+
+        for lambda1 in lambda_grid:
+            # Define model class
+            class NN1(nn.Module):
+                def __init__(self, input_dim):
+                    super().__init__()
+                    self.model = nn.Sequential(
+                        nn.Linear(input_dim, hidden_size),
+                        nn.BatchNorm1d(hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, 1)
+                    )
+                def forward(self, x):
+                    return self.model(x)
+
+            model = NN1(len(predictors))
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=lambda1)
+            criterion = nn.MSELoss()
+
+            train_loader = DataLoader(
+                TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                              torch.tensor(y_train, dtype=torch.float32)),
+                batch_size=batch_size,
+                shuffle=True
+            )
+
+            best_val_r2 = -np.inf
+            patience_counter = 0
+
+            # Train model with early stopping
+            for epoch in range(epochs):
+                model.train()
+                for xb, yb in train_loader:
+                    optimizer.zero_grad()
+                    preds = model(xb).squeeze()
+                    loss = criterion(preds, yb)
+                    loss.backward()
+                    optimizer.step()
+
+                model.eval()
+                with torch.no_grad():
+                    val_pred = model(torch.tensor(X_val, dtype=torch.float32)).squeeze().numpy()
+                    ss_res = np.sum((y_val - val_pred) ** 2)
+                    ss_tot = np.sum(y_val ** 2)
+                    val_r2 = 1 - ss_res / ss_tot
+
+                if val_r2 > best_val_r2:
+                    best_val_r2 = val_r2
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        break
+
+            lambda_r2s[lambda1].append(best_val_r2)
+            print(f"   • λ₁ = {lambda1:.0e} → R² = {best_val_r2:.5f}")
+
+    # Step 4: Average R² per lambda
+    avg_r2s = {lam: np.nanmean(r2s) for lam, r2s in lambda_r2s.items()}
+    best_lambda = max(avg_r2s, key=avg_r2s.get)
+
+    print("\n Average R² by λ₁:")
+    for lam, r2s in avg_r2s.items():
+        print(f"   λ₁ = {lam:.0e} → mean R² = {r2s:.5f}")
+
+    print(f"\n Selected best λ₁: {best_lambda:.0e} (highest average validation R²)\n")
+    return best_lambda
+
+
+
+'''
+**Master Loop to Call Function per Country:**
+
+*With fixed Lambda or optimized Lambda*
+
+'''
+# --------- Fixed Lambda Loop -----------
+def run_all_countries_fixed_lambda():
+    for csv_path in glob(os.path.join(DATA_DIR, "*_cleaned.csv")):
+        try:
+            df = pd.read_csv(csv_path)
+            country = df['country'].iloc[0]
+            print(f"\n Running fixed-lambda model for {country}...")
+
+            country_out = os.path.join(OUTPUT_DIR, f"{country}_results")
+            os.makedirs(country_out, exist_ok=True)
+
+            run_country_model(
+                csv_path,
+                output_dir=country_out,
+                weight_decay=fixed_lambda
+            )
+
+        except Exception as e:
+            print(f" Failed on {csv_path}: {e}")
+
+
+
+# --------- Optimized Lambda Loop -----------
+
+def run_all_countries_with_lambda_optimization():
+    for csv_path in glob(os.path.join(DATA_DIR, "*_cleaned.csv")):
+        try:
+            df = pd.read_csv(csv_path)
+            df['date'] = pd.to_datetime(df['date'])
+            country = df['country'].iloc[0]
+            print(f"\n Running lambda-optimized model for {country}...")
+
+            country_out = os.path.join(OUTPUT_DIR, f"{country}_results")
+            os.makedirs(country_out, exist_ok=True)
+            predictors = [col for col in df.columns if col.endswith('_z')]
+            best_lambda = find_best_lambda_for_country(
+                df.copy(), predictors, hidden_size=NN1_HIDDEN_SIZE,
+                lr=lr, batch_size=batch_size, epochs=epochs, patience=patience
+            )
+            print(f" Best λ₁ for {country}: {best_lambda}")
+
+            run_country_model(
+                csv_path,
+                output_dir=country_out,
+                weight_decay=best_lambda
+            )
+
+        except Exception as e:
+            print(f" Failed on {csv_path}: {e}")
+
+
+
+
+#-------- merge all the per-country summary_metrics ------- good for making a table later on
+
+def merge_all_summary_metrics(output_dir="./results"):
+    summary_files = glob(os.path.join(output_dir, "*_results", "*_summary_metrics.csv"))
+
+    if summary_files:
+        all_metrics = pd.concat([pd.read_csv(f) for f in summary_files])
+        all_metrics.to_csv(os.path.join(output_dir, "all_countries_metrics.csv"), index=False)
+        print(" Combined metrics saved to all_countries_metrics.csv")
+    else:
+        print(" No summary metrics found to merge.")
+
+
+# ---------- Final Control Switch ----------
+# If it's "fixed", we run the NN1 model without tunning lambda
+# If it's "tuned", we run the NN1 model with tunning lambda
+
+if __name__ == "__main__":
+    mode = "tuned"  # or "fixed" or "tuned"
+
+    if mode == "fixed":
+        run_all_countries_fixed_lambda()
+    elif mode == "tuned":
+        run_all_countries_with_lambda_optimization()
+    else:
+        print(" Invalid mode. Choose 'fixed' or 'tuned'")
+
+
+    merge_all_summary_metrics()
+
+
