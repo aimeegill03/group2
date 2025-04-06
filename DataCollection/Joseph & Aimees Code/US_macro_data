@@ -1,0 +1,391 @@
+%pip install fredapi
+%pip install wrds
+%pip install pandas
+
+from fredapi import Fred
+import pandas as pd
+import wrds
+import numpy as np
+
+db = wrds.Connection()
+
+def get_fred_data():
+    """
+    Fetches raw macroeconomic data from FRED:
+    - 3-month T-bill (TB3MS)
+    - 10-year Treasury bond yield (GS10)
+    - BAA and AAA corporate bond yields
+
+    Returns:
+        pd.DataFrame: DataFrame with columns ['tbl', 'gs10', 'baa', 'aaa']
+    """
+    # Your API key
+    api_key = 'ad912147425b5950abdde959e8b3931c'
+    fred = Fred(api_key=api_key)
+
+    # Define FRED series IDs
+    series_ids = {
+        'tbl': 'TB3MS',       # 3-month T-Bill rate
+        'gs10': 'GS10',       # 10-year Treasury Bond Yield
+        'baa': 'BAA',         # BAA corporate bond yield
+        'aaa': 'AAA'          # AAA corporate bond yield
+    }
+
+    # Fetch the data for each series and store it in a dictionary
+    data = {name: fred.get_series(series) for name, series in series_ids.items()}
+
+    # Create a DataFrame from the dictionary of data
+    df = pd.DataFrame(data)
+
+    # Reset the index to turn the date index into a column named 'date'
+    df.reset_index(inplace=True)
+    df.rename(columns={'index': 'date'}, inplace=True) #Rename the index column to 'date'
+
+
+    # Ensure 'date' is in datetime format
+    df['date'] = pd.to_datetime(df['date'])
+
+    # Convert the 'date' column to the end of the month for each row
+    df['date'] = df['date'] + pd.offsets.MonthEnd(0)  
+
+    # Print first few rows to confirm the result
+    print(df.head())
+
+    return df
+
+
+fred_data = get_fred_data()
+print(fred_data.tail())
+
+# Calculating TMS:
+
+fred_data['tms'] = (fred_data['gs10'] - fred_data['tbl'])
+
+
+# Calculating dfy:
+
+fred_data['dfy'] = (fred_data['baa'] - fred_data['aaa'])
+
+
+# Cleaning up:
+
+fred_data = fred_data.drop(columns=['gs10', 'baa', 'aaa'])
+
+print(fred_data.tail())
+
+def get_wrds_macro_data():
+    """
+    Retrieve macro predictor variables from WRDS:
+    - ntis: Net equity issuance (NYSE firms)
+    - bm: Book-to-market ratio (NYSE firms)
+
+    Returns:
+        dict of pandas DataFrames
+    """
+
+    # === Get NYSE permnos first to filter early ===
+    nyse_permnos = db.raw_sql("""
+        SELECT DISTINCT permno
+        FROM crsp.msenames
+        WHERE exchcd = 1 AND nameendt >= '1950-01-01'
+    """)
+
+    # === ntis: Net equity issuance from CRSP (NYSE only) ===
+    crsp_msf = db.raw_sql("""
+        SELECT permno, date, prc, shrout
+        FROM crsp.msf
+        WHERE date >= '1950-01-01'
+        ORDER BY date
+    """)
+    crsp_msf['date'] = pd.to_datetime(crsp_msf['date'])
+
+    crsp_ntis = crsp_msf[crsp_msf['permno'].isin(nyse_permnos['permno'])].copy()
+
+    # === bm: Book-to-market from Compustat (NYSE only) ===
+    comp = db.raw_sql("""
+        SELECT gvkey, datadate, prccq, cshoq, ceqq, tic
+        FROM comp.fundq
+        WHERE consol = 'C' AND indfmt = 'INDL' AND datafmt = 'STD'
+        AND popsrc = 'D' AND datadate >= '1950-01-01'
+        ORDER BY datadate
+    """)
+    comp['datadate'] = pd.to_datetime(comp['datadate'])
+
+    # === Link Compustat to CRSP using CCM ===
+    ccm = db.raw_sql("""
+        SELECT gvkey, lpermno AS permno, linkdt, linkenddt
+        FROM crsp.ccmxpf_linktable
+        WHERE linktype IN ('LU', 'LC') AND usedflag = 1
+    """)
+    ccm['linkdt'] = pd.to_datetime(ccm['linkdt'])
+    ccm['linkenddt'] = pd.to_datetime(ccm['linkenddt']).fillna(pd.Timestamp('today'))
+
+    # Filter CCM to NYSE permnos only
+    ccm = ccm[ccm['permno'].isin(nyse_permnos['permno'])]
+
+    # Merge Compustat and CCM
+    comp_merged = pd.merge(comp, ccm, on='gvkey', how='inner')
+    comp_merged = comp_merged[
+        (comp_merged['datadate'] >= comp_merged['linkdt']) &
+        (comp_merged['datadate'] <= comp_merged['linkenddt'])
+    ]
+
+    return {
+        'ntis_data': crsp_ntis,
+        'bm_data': comp_merged
+    }
+
+
+wrds = get_wrds_macro_data()
+
+print(wrds)
+
+def load_shiller_data(filepath):
+    """
+    Load and clean Shiller's dataset, returning price, dividend, and earnings data.
+
+    Args:
+        filepath (str): path to the downloaded 'ie_data.xls' file
+
+    Returns:
+        pd.DataFrame: Cleaned data with columns ['date', 'price', 'dividend', 'earnings']
+    """
+    # Load Excel file
+    xls = pd.ExcelFile(filepath)
+
+    # Read the correct sheet and skip metadata
+    df = pd.read_excel(xls, sheet_name="Data", skiprows=7)
+
+    # Keep only relevant columns
+    df = df[['Date', 'P', 'D', 'E']].rename(columns={
+        'Date': 'year_month',
+        'P': 'price',
+        'D': 'dividend',
+        'E': 'earnings'
+    })
+
+    # Drop rows with missing values
+    df = df.dropna(subset=['year_month', 'price', 'dividend', 'earnings'])
+
+    # Convert year_month to datetime format
+    df['date'] = pd.to_datetime(
+        df['year_month'].astype(str).str.replace('.', '-'),
+        format='%Y-%m',
+        errors='coerce'
+    )
+
+    # Drop any rows where date conversion failed
+    df = df.dropna(subset=['date'])
+
+    df['price'] = pd.to_numeric(df['price'], errors='coerce')
+    df['dividend'] = pd.to_numeric(df['dividend'], errors='coerce')
+    df['earnings'] = pd.to_numeric(df['earnings'], errors='coerce')
+
+    # Return only final useful columns
+    return df[['date', 'price', 'dividend', 'earnings']]
+
+
+shiller = load_shiller_data("/content/drive/MyDrive/ie_data.xls")
+
+print(shiller)
+
+# 1. Smooth dividends using 12-month trailing sum
+shiller['div_sum'] = shiller['dividend'].rolling(window=12).sum()
+
+# 2. Force numeric conversion for safety
+shiller['div_sum'] = pd.to_numeric(shiller['div_sum'], errors='coerce')
+shiller['price'] = pd.to_numeric(shiller['price'], errors='coerce')
+
+# 3. Filter out rows with zero or negative values
+shiller = shiller[(shiller['div_sum'] > 0) & (shiller['price'] > 0)].copy()
+
+# 4. Calculate log dividend-price ratio
+shiller['dp'] = np.log(shiller['div_sum'].values) - np.log(shiller['price'].values)
+
+# 5. Final result
+shiller['date'] = shiller['date'] + pd.offsets.MonthEnd(0)
+dp_shiller = shiller[['date', 'dp']].dropna()
+print(dp_shiller)
+
+
+# EP Caclulations
+
+# 1. Ensure columns are numeric
+shiller['earnings'] = pd.to_numeric(shiller['earnings'], errors='coerce')
+shiller['price'] = pd.to_numeric(shiller['price'], errors='coerce')
+
+# 2. Convert date to datetime (in case it's not yet)
+shiller['date'] = pd.to_datetime(shiller['date'])
+
+# 3. Align dates to end of month
+shiller['date'] = shiller['date'] + pd.offsets.MonthEnd(0)
+
+# 4. Filter valid rows (log only defined for positive values)
+shiller = shiller[(shiller['earnings'] > 0) & (shiller['price'] > 0)].copy()
+
+# 5. Calculate earnings-price ratio
+shiller['ep'] = np.log(shiller['earnings'].values) - np.log(shiller['price'].values)
+
+# 6. Final tidy result
+ep_shiller = shiller[['date', 'ep']].dropna()
+print(ep_shiller)
+
+#BM calculations
+
+def calculate_bm(bm_data):
+    wrds = bm_data.copy()
+
+    # Convert necessary columns to numeric
+    for col in ['prccq', 'cshoq', 'ceqq']:
+        wrds[col] = pd.to_numeric(wrds[col], errors='coerce')
+
+    # Drop rows with missing/invalid values
+    wrds = wrds[
+        (wrds['prccq'] > 0) & 
+        (wrds['cshoq'] > 0) & 
+        (wrds['ceqq'] > 0)
+    ].copy()
+
+    # Calculate firm-level BM
+    wrds['market_equity'] = wrds['prccq'] * wrds['cshoq']
+    wrds['bm'] = wrds['ceqq'] / wrds['market_equity']
+
+    # Average across all firms for each date (index-level BM)
+    index_bm = wrds.groupby('datadate')['bm'].mean().reset_index()
+    index_bm = index_bm.rename(columns={'datadate': 'date'})
+
+    return index_bm
+
+
+bm_wrds = calculate_bm(wrds['bm_data'])
+print(bm_wrds)
+
+# NTIS Calculation
+
+def calculate_ntis(crsp_ntis):
+    import pandas as pd
+    import numpy as np
+
+    df = crsp_ntis.copy()
+
+    # Convert prices and shares to numeric (shares in thousands)
+    df['prc'] = pd.to_numeric(df['prc'], errors='coerce')
+    df['shrout'] = pd.to_numeric(df['shrout'], errors='coerce')
+    df['mcap'] = np.abs(df['prc']) * df['shrout'] / 1000  # millions
+
+    # Keep necessary columns only
+    df = df[['permno', 'date', 'mcap']].dropna()
+
+    # Sort by permno/date to compute lagged market cap
+    df = df.sort_values(['permno', 'date'])
+    df['mcap_lag'] = df.groupby('permno')['mcap'].shift(1)
+
+    # Compute firm-level issuance
+    df['issue'] = df['mcap'] - df['mcap_lag']
+
+    # Sum issuance and total market cap by month (cross-section)
+    agg = df.groupby('date').agg({
+        'issue': 'sum',
+        'mcap': 'sum'
+    }).dropna()
+
+    # Compute NTIS ratio
+    agg['ntis'] = agg['issue'] / agg['mcap']
+
+    return agg[['ntis']].reset_index()
+
+
+ntis_df = calculate_ntis(wrds['ntis_data'])
+print(ntis_df.tail())
+
+
+def get_wrds_svar_data():
+    """
+    Retrieve macro predictor variables from WRDS:
+    - svar: Stock variance (from daily returns on S&P 500)
+
+    Returns:
+        dict of pandas DataFrames
+    """
+
+    # === svar ===
+    # S&P 500 daily total returns for stock variance calculation
+    sp500_daily = db.raw_sql("""
+        SELECT caldt AS date, vwretd AS ret
+        FROM crsp.dsp500
+        ORDER BY caldt
+    """)
+    sp500_daily['date'] = pd.to_datetime(sp500_daily['date'])
+
+    return {
+        'svar_daily': sp500_daily
+    }
+
+
+x = get_wrds_svar_data()
+svar_df = x['svar_daily']
+print(svar_df.head())
+
+
+# Calculation of monthly SVAR
+
+def calculate_svar(sp500_daily):
+    """
+    Calculate monthly stock variance (svar) from daily returns data.
+
+    Args:
+        sp500_daily (pd.DataFrame): DataFrame with columns ['date', 'ret'] where 'ret' is daily return.
+
+    Returns:
+        pd.DataFrame: Monthly stock variance ('svar') with month-end dates.
+    """
+    # Group by year and month
+    sp500_daily['year_month'] = sp500_daily['date'].dt.to_period('M')
+
+    # Calculate monthly variance of returns
+    monthly_variance = sp500_daily.groupby('year_month')['ret'].var().reset_index()
+
+    # Rename columns
+    monthly_variance = monthly_variance.rename(columns={'year_month': 'date', 'ret': 'svar'})
+
+    # Convert to timestamp and set to end of month
+    monthly_variance['date'] = monthly_variance['date'].dt.to_timestamp() + pd.offsets.MonthEnd(0)
+
+    return monthly_variance
+
+
+svar_df = calculate_svar(x['svar_daily'])
+print(svar_df.tail())
+
+# Merging the dfs:
+
+macro_variables = svar_df.copy()
+
+for df in [ntis_df, bm_wrds, ep_shiller, dp_shiller, fred_data]:
+    macro_variables = pd.merge(macro_variables, df, on='date', how='outer')
+
+macro_variables = macro_variables.sort_values('date').reset_index(drop=True)
+
+macro_variables.to_excel("macro_variables.xlsx", index=False)
+
+
+print(macro_variables.tail())
+print(macro_variables.columns)
+
+# Cleaning
+
+df = pd.read_excel("macro_variables.xlsx") 
+
+df['date'] = df['date'].astype(str)
+
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+df = df.dropna(subset=['date'])
+
+df = df.groupby('date').mean().reset_index()
+
+df = df[df['date'] >= '1962-01-01'].sort_values('date').reset_index(drop=True)
+
+df.to_excel("US_macro_variables_cleaned.xlsx", index=False)
+
+print(df.head())
