@@ -1,1 +1,42 @@
+import os
+import pandas as pd
 
+
+def drop_return_z_columns(folder_path):
+    """
+    **Use to correct a FIXED mistake in the cleaning pipeline!**
+
+    Loads all CSV files in a folder, drops specific columns related to normalized returns,
+    and overwrites the original files with the cleaned version.
+
+    Parameters:
+    - folder_path (str): Path to the folder containing CSV files.
+    """
+    # Columns to drop if they exist
+    cols_to_drop = [
+        'monthly_return_z',
+        'excess_return_winsorized_z',
+        'excess_return_z',
+        'excess_return_lead_z'
+    ]
+
+    # Loop over all CSV files in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.csv'):
+            file_path = os.path.join(folder_path, filename)
+            print(f"Processing: {filename}")
+
+            # Load CSV into DataFrame
+            df = pd.read_csv(file_path)
+
+            # Drop columns if they exist
+            existing_cols = [col for col in cols_to_drop if col in df.columns]
+            df.drop(columns=existing_cols, inplace=True)
+
+            # Save cleaned DataFrame with the same filename (overwrite)
+            df.to_csv(file_path, index=False)
+
+            print(f" → Dropped columns: {existing_cols if existing_cols else 'None found'}")
+            print(f" → Saved cleaned file: {filename}\n")
+
+drop_return_z_columns(r"C:\Users\josep\Desktop\dsif_countries\countries_cleaned")
