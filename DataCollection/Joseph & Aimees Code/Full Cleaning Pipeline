@@ -1,12 +1,25 @@
+import wrds
 import pandas as pd
 import numpy as np
 from scipy.stats.mstats import winsorize
 import matplotlib.pyplot as plt
 
+# Connect to WRDS
+print("Connecting to WRDS...")
+wrds_db = wrds.Connection()
+print("Connected to WRDS successfully!")
+
+# Downloading and extracting list of countries
+print("Downloading list of countries...")
+countries = pd.read_excel('https://github.com/bkelly-lab/ReplicationCrisis/raw/master/GlobalFactors/Country%20Classification.xlsx')
+countries_list = countries['excntry'].tolist()
+print(f"Found {len(countries_list)} countries: {countries_list}")
+
 relevant_chars = {"id":"id", "eom":"date", "excntry":"country", "gvkey":"gvkey",
                   "permno":"permno", "crsp_exchcd":"crsp_exch_code",
                   "comp_exchg":"comp_exch_code",
-                  "me":"me", "sic":"sic", "ff49":"ff49",
+                  "me":"me", "sic":"sic", "ff49":"ff49", "ret_exc":"excess_return",
+                  "ret_exc_lead1m":"excess_return_lead",
                   "taccruals_at":"absacc", "oaccruals_at":"acc", "at_gr1":"agr",
                   "be_me":"bm", "cash_at":"cash_ass", "debt_at":"debt_ass",
                   "fcf_me":"cfp", "ret_6_0":"mom_6m", "ebit_sale":"pm",
@@ -16,7 +29,8 @@ relevant_chars = {"id":"id", "eom":"date", "excntry":"country", "gvkey":"gvkey",
                   "ret_1_0":"rev_1m", "ret_6_1":"mom_6m_lag",
                   "taccruals_ni":"pctacc", "rvol_21d":"retvol", "ni_be":"roe",
                   "sale_gr1":"sgr", "sales":"sales", "prc":"price",
-                  "turnover_126d":"turn"
+                  "turnover_126d":"turn", "ret_exc_winsorized":"excess_return_winsorized",
+                  "ret_exc_lead1m_winsorized":"excess_return_lead_winsorized"
                   }
 
 rel_chars = []
@@ -99,9 +113,9 @@ def winsorize_column(
     # Optionally visualize
     if plot:
         plt.hist(df[value_col], bins=bins, alpha=0.5, label='Original',
-                 color='red')
+                 color='red', density=True)
         plt.hist(df[output_col], bins=bins, alpha=0.5, label='Winsorized',
-                 color='yellow')
+                 color='yellow', density=True)
         plt.xlim(xlim)
         plt.legend()
         plt.title(f'{value_col}: Before & After Winsorization')
@@ -111,7 +125,7 @@ def winsorize_column(
 
 def filter_extreme_return_reversals(
     df,
-    return_col='returns_winsorized',
+    return_col='ret_exc',
     id_col='id',
     date_col='eom',
     lag_threshold=3.0,
@@ -146,9 +160,9 @@ def filter_extreme_return_reversals(
 
 # To convert return to missing if return == 0:
 
-def convert_zero_return_to_missing(df, return_col='returns_winsorized'):
+def convert_zero_return_to_missing(df, return_col="ret_exc"):
   df = df.copy()
-  df.loc[df['returns_winsorized'] == 0, 'returns_winsorized'] = np.nan
+  df.loc[df[return_col] == 0, return_col] = np.nan
 
   return df
 
@@ -219,28 +233,33 @@ def industry_adjust(
 
     return df
 
-def replace_zero_bm_ia_with_missing(df, bm_ia_col='bm_ia', bm_col='bm'):
+def replace_zero_adjusted_with_missing(df, adjusted_col, raw_col):
     """
-    Replaces zero values in the industry-adjusted book-to-market column (bm_ia)
-    with NaN if the associated raw bm value is missing.
+    Replaces zero values in an industry-adjusted column with NaN if the
+    corresponding raw column is NaN. Helps correct for artifacts from
+    industry_adjust() where missing raw values lead to zero adjustments.
 
     Parameters:
     - df: pandas DataFrame
-    - bm_ia_col: name of the industry-adjusted bm column (default: 'bm_ia')
-    - bm_col: name of the raw book-to-market column (default: 'bm')
+    - adjusted_col: name of the adjusted column (e.g., 'bm_ia')
+    - raw_col: name of the original unadjusted column (e.g., 'bm')
 
     Returns:
-    - Modified DataFrame with updated bm_ia column
+    - DataFrame with corrected adjusted column
     """
     df = df.copy()
-    condition = (df[bm_col].isna()) & (df[bm_ia_col] == 0)
-    df.loc[condition, bm_ia_col] = np.nan
+    condition = (df[raw_col].isna()) & (df[adjusted_col] == 0)
+    df.loc[condition, adjusted_col] = np.nan
     return df
 
 
 def construct_cf_d(df):
 
-  df["cashdebt"] = df["cash_ass"]/df["debt_ass"]
+  df["cashdebt"] = np.where(
+    df["debt_ass"] == 0,
+    0,
+    df["cash_ass"] / df["debt_ass"]
+)
 
   return df
 
@@ -372,26 +391,12 @@ def construct_sp(df):
 
   return df
 
-def drop_misc_cols(df, cols=None):
-  df = df.copy()
-
-  columns = ['sales', 'monthly_return', 'was_winsorized', 'chpm']
-
-  if cols:
-    columns.extend(cols)
-
-  for column in columns:
-    if column in df.columns:
-      df.drop(columns=column, inplace=True)
-
-  return df
-
 def filter_valid_countries(
     df,
     id_col='id',
     date_col='date',
     country_col='country',
-    return_col='returns_winsorized',
+    return_col='excess_return',
     core_vars=['bm', 'me', 'price', 'ff49', 'dy', 'mom_6m', 'mom_12m',
                'pctacc', 'acc', 'agr', 'cash_ass', 'debt_ass', 'turn',
                'maxret', 'pm'],
@@ -464,14 +469,187 @@ def filter_valid_countries(
         return df, dropped_countries
     else:
         return df
+    
+# SOLUTION FOR MISSING VARIABLES GOES HERE:
+# We will drop variables for individual country datasets if over 50% of 
+# observations are missing.
+
+def drop_high_missing_columns(df, columns_to_check=None, threshold=0.5, diagnostics=True):
+    """
+    Drops columns from df that have missing values >= threshold proportion,
+    restricted to a subset of columns if specified.
+
+    Parameters:
+    - df (pd.DataFrame): The input dataframe
+    - columns_to_check (list of str): List of columns to check for missingness.
+                                      Defaults to a predefined standard list.
+    - threshold (float): Proportion of missingness to tolerate (default = 0.5)
+
+    Returns:
+    - pd.DataFrame: DataFrame with high-missing columns removed
+    """
+
+    # Define default list if none provided
+    if columns_to_check is None:
+        columns_to_check = [
+            'me', 'absacc', 'acc', 'agr', 'bm', 'cash_ass',
+            'debt_ass', 'cfp', 'mom_6m', 'pm', 'dolvol', 'dy', 'egr', 'ep',
+            'ill', 'mom_12m', 'lev', 'lgr', 'maxret', 'rev_1m', 
+            'mom_6m_lag', 'pctacc', 'retvol', 'roe', 'sgr', 'sales','price',
+            'turn', 'monthly_return', 'exchange', 'excess_return_winsorized', 
+            "excess_return_lead_winsorized", 'cashdebt', 'chmom_6m', 'chpm',
+            'bm_ia', 'cfp_ia', 'mve_ia', 'chpm_ia', 'indmom_a_12m', 
+            'stddolvol', 'stdturn', 'mvel1', 'sp']
+        
+    # Calculate missing ratios only for relevant columns
+    missing_ratio = df[columns_to_check].isnull().mean()
+
+    # Find columns to drop
+    cols_to_drop = missing_ratio[missing_ratio >= threshold].index.tolist()
+
+    if diagnostics:
+        # Print diagnostic:
+        print(f"{len(cols_to_drop)} variable(s) dropped out of {len(columns_to_check)}.")
+
+    # Drop those columns from df (entire DataFrame, not just the subset)
+    df = df.drop(columns=cols_to_drop)
+
+    return df
+
+def impute_cross_sectional_median(df, features=None, date_col='date', diagnostics=True):
+    """
+    Fills missing values in selected feature columns with the cross-sectional median,
+    grouped by the specified date column. Also prints diagnostics on missingness.
+
+    Parameters:
+    - df: pandas DataFrame
+    - features: list of columns to impute (default: common finance factors)
+    - date_col: name of the date column (default: 'date')
+
+    Returns:
+    - df_imputed: a copy of the DataFrame with missing values filled
+    """
+    if features is None:
+        features = [
+            'me', 'absacc', 'acc', 'agr', 'bm', 'cash_ass',
+            'debt_ass', 'cfp', 'mom_6m', 'pm', 'dolvol', 'dy', 'egr', 'ep',
+            'ill', 'mom_12m', 'lev', 'lgr', 'maxret', 'rev_1m', 
+            'mom_6m_lag', 'pctacc', 'retvol', 'roe', 'sgr', 'sales','price',
+            'turn', 'cashdebt', 'chmom_6m', 'chpm',
+            'bm_ia', 'cfp_ia', 'mve_ia', 'chpm_ia', 'indmom_a_12m', 
+            'stddolvol', 'stdturn', 'mvel1', 'sp'
+            ]
+
+    df_imputed = df.copy()
+
+    # Ensure date column is datetime type
+    df_imputed[date_col] = pd.to_datetime(df_imputed[date_col])
+
+    # Keep only features that exist in the dataframe
+    features = [f for f in features if f in df_imputed.columns]
+
+    if diagnostics:
+        # Diagnostic print
+        print("\n[impute_cross_sectional_median diagnostic]")
+        print(f"→ Number of feature columns being imputed: {len(features)}")
+        print(f"→ Sample of features: {features[:10]}")
+        impute_columns = set(features)  # for comparing later
+
+        # --- Diagnostics BEFORE imputation ---
+        total_rows = len(df_imputed)
+        rows_with_missing_before = df_imputed[features].isnull().any(axis=1).sum()
+        total_missing_before = df_imputed[features].isnull().sum().sum()
+        print(f"Before imputation:")
+        print(f" → {rows_with_missing_before:,} rows ({(rows_with_missing_before / total_rows) * 100:.2f}%) had at least one missing value.")
+        print(f" → Total missing values: {total_missing_before:,}")
+
+    # --- Imputation step ---
+    for col in features:
+        df_imputed[col] = df_imputed.groupby(date_col)[col].transform(
+            lambda x: x.fillna(x.median())
+        )
+    if diagnostics:
+        # --- Diagnostics AFTER imputation ---
+        rows_with_missing_after = df_imputed[features].isnull().any(axis=1).sum()
+        total_missing_after = df_imputed[features].isnull().sum().sum()
+        imputations_made = total_missing_before - total_missing_after
+
+        print(f"After imputation:")
+        print(f" → {rows_with_missing_after:,} rows ({(rows_with_missing_after / total_rows) * 100:.2f}%) still have missing values.")
+        print(f" → Total missing values: {total_missing_after:,}")
+        print(f" → Total imputations made: {imputations_made:,}")
+
+    return df_imputed, impute_columns
+
+# NOTE: An option here is to skip "drop_missing_rows" above and instead 
+# impute these missing observations as 0 - AFTER NORMALIZATION (so normalziation
+# ) isn't affected. For now, we leave it as dropping and will see how many are
+# dropped afterwards
+
+def drop_missing_rows(df, exclusionary_columns=None, diagnostics=True):
+    """
+    Drops all rows with any missing values from the DataFrame,
+    except for columns in the exclusionary_columns list,
+    for which missing values are set to 0.
+
+    Parameters:
+    - df: pandas DataFrame
+    - exclusionary_columns: list of columns to exclude from row-dropping (NaNs set to 0 instead)
+
+    Returns:
+    - cleaned_df: DataFrame with rows containing NaNs (outside exclusions) removed
+    - stats: dict with number and percentage of dropped rows
+    """
+    if exclusionary_columns is None:
+        exclusionary_columns = ['id', 'date', 'country', 'gvkey',
+                  'permno', 'crsp_exch_code', 'comp_exch_code', 'sic', 'ff49',
+                  'exchange']
+
+    df = df.copy()
+
+    # Fill NaNs with 0 in exclusionary columns
+    df[exclusionary_columns] = df[exclusionary_columns].fillna(0)
+
+    original_rows = len(df)
+
+    # Drop rows with NaNs in remaining columns
+    cols_to_check = [col for col in df.columns if col not in exclusionary_columns]
+
+    if diagnostics:
+        # Diagnostic print
+        print("\n[drop_missing_rows diagnostic]")
+        print(f"→ Total columns in df: {len(df.columns)}")
+        print(f"→ Columns excluded from drop: {len(exclusionary_columns)}")
+        print(f"→ Columns being checked for missing values: {len(cols_to_check)}")
+        print(f"→ Sample of checked columns: {cols_to_check[:10]}")
+    
+    drop_check_columns = set(cols_to_check)  # for comparing later
+
+    cleaned_df = df.dropna(subset=cols_to_check)
+
+    cleaned_rows = len(cleaned_df)
+    dropped_rows = original_rows - cleaned_rows
+    dropped_pct = (dropped_rows / original_rows) * 100 if original_rows > 0 else 0.0
+
+    stats = {
+        'original_rows': original_rows,
+        'dropped_rows': dropped_rows,
+        'dropped_pct': dropped_pct
+    }
+
+    print(f"Dropped {dropped_rows:,} rows ({dropped_pct:.2f}%) due to missing values (excluding: {exclusionary_columns}).")
+
+    return cleaned_df, stats, drop_check_columns
 
 def normalize_characteristics(
     df,
     cols_to_normalize=None,
     group_cols=['date', 'country'],
     suffix='_z',
-    exclude_cols=['id', 'date', 'country', 'returns_winsorized', 'gvkey',
-                  'permno', 'crsp_exch_code', 'comp_exch_code', 'sic', 'ff49']
+    exclude_cols=['id', 'date', 'country', 'excess_return_winsorized', 'gvkey',
+                  'permno', 'crsp_exch_code', 'comp_exch_code', 'sic', 'ff49',
+                  'exchange', "excess_return_lead_winsorized", "excess_return",
+                  "excess_return_lead", "monthly_return"]
 ):
     """
     Normalizes specified columns (or all except excluded ones) to mean 0 and std 1 within each group.
@@ -485,10 +663,11 @@ def normalize_characteristics(
 
     Returns:
     - DataFrame with new normalized columns added
+    - List of original columns that were normalized (to be dropped)
     """
     df = df.copy()
 
-    # Filter to numeric but not boolean columns:
+    # Determine which columns to normalize
     if cols_to_normalize is None:
         cols_to_normalize = [
             col for col in df.columns
@@ -499,6 +678,7 @@ def normalize_characteristics(
             )
         ]
 
+    # Apply normalization within each group
     for col in cols_to_normalize:
         normalized_col = f'{col}{suffix}'
         df[normalized_col] = (
@@ -507,19 +687,56 @@ def normalize_characteristics(
             .transform(lambda x: (x - x.mean()) / x.std())
         )
 
-    return df
+    # Fill any NaNs introduced during normalization with 0 (neutral)
+    normalized_cols = [f'{col}{suffix}' for col in cols_to_normalize]
+    df[normalized_cols] = df[normalized_cols].fillna(0)
 
+    # Return df and the *original* columns that were normalized
+    return df, cols_to_normalize
 
-def run_cleaning_pipeline(df, relevant_chars=relevant_chars):
+# NOTE: An option here is to skip "drop_missing_rows" above and instead 
+# impute these missing observations as 0 - AFTER NORMALIZATION (so normalziation
+# ) isn't affected. For now, we leave it as dropping and will see how many are
+# dropped afterwards
+
+def drop_cols(df, cols=None):
+  df = df.copy()
+
+  columns = ['sales', 'monthly_return', 'was_winsorized', 'chpm']
+
+  if cols:
+    columns.extend(cols)
+
+  for column in columns:
+    if column in df.columns:
+      df.drop(columns=column, inplace=True)
+
+  return df
+
+def filter_large_dataframe(df):
+    """
+    Returns the original dataframe if it has more than 50,000 rows,
+    otherwise returns a completely empty dataframe (no rows, no columns).
+    """
+    if len(df) > 50000:
+        return df
+    else:
+        return pd.DataFrame()
+
+def run_cleaning_pipeline(df, relevant_chars=relevant_chars, diagnostics=True, keep_lead=True):
     """
     Runs the full cleaning and transformation pipeline on a given DataFrame.
 
     Parameters:
     - df: Input pandas DataFrame with required raw columns
     - relevant_chars: Dictionary of variable renaming {old_name: new_name}
+    - diagnostics: simple prints that occur throughout for testing
+    - keep_lead: default to true. Keeps a columns with 1 month lead for excret
 
     Returns:
     - Cleaned and transformed DataFrame
+    - stats about which variables were dropped
+    - "current_columns" which was for testing and can be ignored
     """
 
     # The following order must be preserved! If anything extra must be added in
@@ -540,14 +757,27 @@ def run_cleaning_pipeline(df, relevant_chars=relevant_chars):
     df = create_single_exchange_col(df)
 
     # Winsorize monthly returns per exchange per month:
-    df = winsorize_column(df, 'monthly_return',
-                          output_col='returns_winsorized', plot=True)
+    df = winsorize_column(df, 
+                          'ret_exc', 
+                          plot=True,
+                          add_flag=False)
+    if keep_lead:
+        df = winsorize_column(df, 
+                          'ret_exc_lead1m', 
+                          plot=True,
+                          add_flag=False)
 
     # Set extreme return reversals to missing:
     df = filter_extreme_return_reversals(df)
 
+    if keep_lead:
+        df = filter_extreme_return_reversals(df, return_col="ret_exc_lead1m")
+
     # Convert "zero" returns to missing:
     df = convert_zero_return_to_missing(df)
+
+    if keep_lead:
+        df = convert_zero_return_to_missing(df, return_col="ret_exc_lead1m")
 
     # Rename variables:
     df = rename_vars(df, relevant_chars)  # Highly important positionally
@@ -565,8 +795,12 @@ def run_cleaning_pipeline(df, relevant_chars=relevant_chars):
     df = industry_adjust(df, "me", output_col="mve_ia")
     df = industry_adjust(df, "chpm", output_col="chpm_ia")
 
-    # Replace '0' values in bm_ia with missing, if there is no associated bm:
-    df = replace_zero_bm_ia_with_missing(df)
+    # Replace '0' values in industry-adjusted variables 
+    # with missing, if there is no associated original:
+    df = replace_zero_adjusted_with_missing(df, adjusted_col="bm_ia", raw_col="bm")
+    df = replace_zero_adjusted_with_missing(df, adjusted_col="cfp_ia", raw_col="cfp")
+    df = replace_zero_adjusted_with_missing(df, adjusted_col="mve_ia", raw_col="me")
+    df = replace_zero_adjusted_with_missing(df, adjusted_col="chpm_ia", raw_col="chpm")
 
     # Creating equal-weighted industry-level variable(s):
     df = construct_industry_mean(df, "mom_12m", output_col="indmom_a_12m")
@@ -581,19 +815,59 @@ def run_cleaning_pipeline(df, relevant_chars=relevant_chars):
     # Create sales to price:
     df = construct_sp(df)
 
-    # Drop misc/intermediate columns:
-    df = drop_misc_cols(df)
-
     # Filter to keep markets with only 100 stocks with 3 non-consecutive years
     # of observations of return and at least one of the 'core vars':
     df, _ = filter_valid_countries(df, return_dropped=True)
 
+    current_columns = list(df.columns)
+
+    df = drop_high_missing_columns(df)
+
+    df, impute_columns = impute_cross_sectional_median(df)
+
+    df, dropped_stats, drop_check_columns = drop_missing_rows(df)
+
+    if diagnostics:
+        # Compare sets to detect mismatches
+        print(f"\nColumns checked for missingness (drop) but not imputed: {sorted(drop_check_columns - impute_columns)}")
+        print(f"Columns imputed but NOT checked for missingness: {sorted(impute_columns - drop_check_columns)}")
+
+        print("[Before normalization]")
+        print(df.isnull().sum().sort_values(ascending=False).head(10))
+
+
     # Normalization of all stock characteristics per month, per country. This
     # does NOT touch stock returns. It normalizes all to zero mean and unit
     # standard deviation.
-    df = normalize_characteristics(df)
+    df, cols_to_normalize = normalize_characteristics(df)
+
+    if diagnostics:
+        print("[After normalization]")
+        print(df.isnull().sum().sort_values(ascending=False).head(10))
+
+
+    # Possible to switch from dropping rows (after imputation) to imputing w/0s
+    # here depending on whether too many rows are dropped
+
+    drops = ["crsp_exch_code", "comp_exch_code",
+     "excess_return", "excess_return_lead"]
+    cols_to_normalize.extend(drops)
+
+    # Drop misc/intermediate columns:
+    df = drop_cols(df, cols=cols_to_normalize)
 
     # Reset index before returning
     df = df.reset_index(drop=True)
 
-    return df
+    if diagnostics:
+        rows_with_any_missing = df.isnull().any(axis=1).sum()
+        total_missing_values = df.isnull().sum().sum()
+
+        print(f"\n[Final Missingness Diagnostic]")
+        print(f"→ Rows with at least one missing value: {rows_with_any_missing:,}")
+        print(f"→ Total missing values across all columns: {total_missing_values:,}")
+
+    # Ensure correct date order before returning
+    df = df.sort_values(by="date")
+
+    return df, dropped_stats, current_columns
