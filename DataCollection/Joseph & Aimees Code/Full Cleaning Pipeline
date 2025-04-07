@@ -1,3 +1,21 @@
+"""
+Note, this pipeline was updated to replace returns with excess returns,
+AND have both excess returns AND excess return 1 month lead.
+However, there was a mistake in this in that most countries were processed
+with a mistake in excess returns (no lead).
+
+This is unfortuneate, however, we were not planning on using non-leading
+excess return anyway. 
+
+This note is only to let you know that the reason
+excess return and excess return lead are both processed in the cleaning 
+pipeline and then excess return is subsequently dropped is due to that
+earlier mistake and making the rest of the countries match with that.
+
+While this causes more wasted processing, it is a 1-time expense.
+- Joseph 
+"""
+
 import wrds
 import pandas as pd
 import numpy as np
