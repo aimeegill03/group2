@@ -1,0 +1,95 @@
+'''This code is used to calculate U.S Factor returns, U.S. Characteristic gaps, and Local Factor returns'''
+
+import os
+import pandas as pd
+import numpy as np
+
+# Paths
+input_folder = 'countries_cleaned'
+output_folder = 'countries_factors_gaps'
+os.makedirs(output_folder, exist_ok=True)
+
+# Column used for return-based calculations
+return_col = 'returns_winsorized'
+
+# List of z-scored characteristics (excluding returns)
+char_cols = [
+    'me_z', 'absacc_z', 'acc_z', 'agr_z', 'bm_z', 'cash_ass_z', 'debt_ass_z', 'cfp_z', 'mom_6m_z', 'pm_z',
+    'dolvol_z', 'dy_z', 'egr_z', 'ep_z', 'ill_z', 'mom_12m_z', 'lev_z', 'lgr_z', 'maxret_z', 'rev_1m_z',
+    'mom_6m_lag_z', 'pctacc_z', 'retvol_z', 'roe_z', 'sgr_z', 'sales_z', 'price_z', 'turn_z',
+    'cashdebt_z', 'chmom_6m_z', 'chpm_z', 'bm_ia_z', 'cfp_ia_z', 'mve_ia_z', 'chpm_ia_z', 'indmom_a_12m_z',
+    'stddolvol_z', 'stdturn_z', 'mvel1_z', 'sp_z'
+]
+
+# Go through each CSV file in the input folder
+for filename in os.listdir(input_folder):
+    if not filename.endswith('_cleaned.csv'):
+        continue
+
+    country_code = filename.replace('_cleaned.csv', '')
+    filepath = os.path.join(input_folder, filename)
+
+    # Read CSV with correct date parsing
+    df = pd.read_csv(
+        filepath,
+        parse_dates=['date'],
+        date_format="%Y-%m-%d"
+    )
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    if return_col not in df.columns:
+        raise ValueError(f"{return_col} missing in {filename}")
+
+    # ----- FACTOR RETURN CALCULATION ----- (top 10% - bottom 10%)
+    factor_data = []
+    for date, group in df.groupby('date'):
+        row = {'date': date}
+        for char in char_cols:
+            if char not in group.columns:
+                continue
+            valid = group[[char, return_col]].dropna()
+            if len(valid) < 10:
+                row[char] = np.nan
+                continue
+            sorted_df = valid.sort_values(by=char)
+            decile = int(len(sorted_df) * 0.1)
+            top = sorted_df.iloc[-decile:][return_col].mean()
+            bottom = sorted_df.iloc[:decile][return_col].mean()
+            row[char] = top - bottom
+        factor_data.append(row)
+
+    factor_df = pd.DataFrame(factor_data)
+    if 'date' in factor_df.columns:
+        factor_df.sort_values('date', inplace=True)
+
+
+
+    # Rename columns: _z → _factor
+    factor_df.rename(columns={col: col.replace('_z', '_factor') for col in factor_df.columns if col != 'date'}, inplace=True)
+
+    factor_df.to_csv(os.path.join(output_folder, f'{country_code}_factors.csv'), index=False)
+
+    # ----- CHARACTERISTIC GAPS FOR USA ----- (95th - 5th percentiles)
+    if country_code == 'USA':
+        gap_data = []
+        for date, group in df.groupby('date'):
+            row = {'date': date}
+            for char in char_cols:
+                if char not in group.columns:
+                    continue
+                vals = group[char].dropna()
+                if len(vals) < 10:
+                    row[char] = np.nan
+                    continue
+                row[char] = np.percentile(vals, 95) - np.percentile(vals, 5)
+            gap_data.append(row)
+
+        gap_df = pd.DataFrame(gap_data)
+        if 'date' in gap_df.columns:
+            gap_df.sort_values('date', inplace=True)
+  
+
+        # Rename columns: _z → _gap
+        gap_df.rename(columns={col: col.replace('_z', '_gap') for col in gap_df.columns if col != 'date'}, inplace=True)
+
+        gap_df.to_csv(os.path.join(output_folder, 'USA_gaps.csv'), index=False)
