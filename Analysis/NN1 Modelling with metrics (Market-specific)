@@ -361,7 +361,9 @@ def find_best_lambda_for_country(
     """
 
     # Step 1: Preprocess
-    df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    #df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    df['returns_next_month'] = df[TARGET]
+
     df[predictors] = df[predictors].fillna(0)
     df.dropna(subset=predictors + ['returns_next_month'], inplace=True)
     df['year'] = df['date'].dt.year
