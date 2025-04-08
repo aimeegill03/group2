@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 
 #----------------- modifiables --------------------
-TARGET = "returns_winsorized"
+TARGET = "excess_return_lead"
 
 Estimator = 1 # Number of repeating NN model
 NN1_HIDDEN_SIZE = 32 #1 hidden layer with 32 neurons
@@ -58,7 +58,9 @@ def run_country_model(csv_path, output_dir, hidden_size=NN1_HIDDEN_SIZE, patienc
     # Create next month's return (shifted target)
 
 
-    df['returns_next_month'] = df.groupby('id')[TARGET].shift(-1)
+    #df['returns_next_month'] = df.groupby('id')[TARGET].shift(-1)
+    df['returns_next_month'] = df[TARGET]
+
 
     # Optional: Fill/impute missing predictor values
     df[PREDICTORS] = df[PREDICTORS].fillna(0) # or use mean/median
