@@ -10,7 +10,7 @@ output_folder = 'countries_factors_gaps'
 os.makedirs(output_folder, exist_ok=True)
 
 # Column used for return-based calculations
-return_col = 'returns_winsorized'
+return_col = 'excess_return_lead_winsorized'
 
 # List of z-scored characteristics (excluding returns)
 char_cols = [
