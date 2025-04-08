@@ -18,7 +18,7 @@ from glob import glob
 from collections import defaultdict
 
 #----------------- Modifiables --------------------#
-TARGET = "returns_winsorized"
+TARGET = "excess_return_lead"
 
 PREDICTORS_BASE = [
     "me_z", "absacc_z", "acc_z", "agr_z", "bm_z", "cash_ass_z", "debt_ass_z", "cfp_z", "mom_6m_z", "pm_z",
@@ -54,7 +54,9 @@ def run_pooled_global_model(use_tuned_lambda=True):
     df['year'] = df['date'].dt.year
 
     # Target: next month’s return
-    df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    #df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    df['returns_next_month'] = df[TARGET]
+
 
     # ---------- Add Country Fixed Effects via Dummies ----------
     df = pd.get_dummies(df, columns=['country'], drop_first=True)  # drop USA dummy
