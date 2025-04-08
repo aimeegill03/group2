@@ -274,7 +274,9 @@ def find_best_lambda_for_pooled(df, predictors, lambda_grid=[1e-5, 1e-4, 1e-3]):
 
     #------------------ Preprocessing ------------------#
     # Create prediction target
-    df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    #df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    df['returns_next_month'] = df[TARGET]
+
 
     # Fill missing values in predictors (e.g. 0 or other logic)
     df[predictors] = df[predictors].fillna(0)
