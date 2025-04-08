@@ -18,7 +18,7 @@ from glob import glob
 from collections import defaultdict
 
 #----------------- Modifiables --------------------#
-TARGET = "excess_return_lead"
+TARGET = "excess_return_lead_winsorized"
 
 PREDICTORS_BASE = [
     "me_z", "absacc_z", "acc_z", "agr_z", "bm_z", "cash_ass_z", "debt_ass_z", "cfp_z", "mom_6m_z", "pm_z",
