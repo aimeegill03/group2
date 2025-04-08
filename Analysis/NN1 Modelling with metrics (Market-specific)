@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 
 #----------------- modifiables --------------------
-TARGET = "excess_return_lead"
+TARGET = "excess_return_lead_winsorized"
 
 Estimator = 1 # Number of repeating NN model
 NN1_HIDDEN_SIZE = 32 #1 hidden layer with 32 neurons
