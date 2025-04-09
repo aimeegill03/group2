@@ -9,7 +9,7 @@ import os
 # import import_ipynb
 import glob
 # from "/content/drive/MyDrive/Colab Notebooks/project_code.ipynb" import run_cleaning_pipeline
-# Green does not work for Aimee. Can try on Joseph's computer later
+# Green does not work for Aimee. Can try on Joseph's computer later  ---> Because there's a space between Colab and Notbooks
 
 from google.colab import drive
 drive.mount('/content/drive')
@@ -133,6 +133,7 @@ def download_wrds_data(
 df, remaining_countries = download_wrds_data(countries_list, rel_chars, wrds_db,
                                              batch_size=100000)
 
+#-------------------------------------------- Code to be run separately -------------------------------------------------
 # As the retrieval of data crashes before I can merge together, this function
 # combines all the batches
 
@@ -154,6 +155,10 @@ def write_combined_csv_in_chunks(folder_path, output_path):
 df_preview = pd.read_csv("/content/drive/MyDrive/Countries/full_dataset.csv", nrows=10)
 print(df_preview)
 
+#-------------------------------------------- Code to be run separately -------------------------------------------------
+# need extra libraries to be imported for this section to work:
+from collections import defaultdict
+import re
 
 # Let's have another option rather than combining every single csv. Instead,
 # let's combine by country with one final csv for each country:
@@ -192,11 +197,13 @@ def write_country_csvs_by_batch(folder_path, output_folder):
     print("Done writing per-country CSVs!")
 
 
+#below, I removed "Colab Notebooks/" from the path:
 write_country_csvs_by_batch(
-    folder_path="/content/drive/MyDrive/Colab Notebooks/Countries",
-    output_folder="/content/drive/MyDrive/Colab Notebooks/Countries"
+    folder_path="/content/drive/MyDrive/Countries",
+    output_folder="/content/drive/MyDrive/Countries"
 )
 
+#-------------------------------------------- Code to be run separately -------------------------------------------------
 # Define function to take each country csv, read it to a df and clean it.
 
 def clean_each_country_file(input_folder, output_folder,
