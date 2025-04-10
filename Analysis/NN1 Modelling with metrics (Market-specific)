@@ -633,7 +633,7 @@ def find_best_lambda_for_country(
     for lam, r2s in avg_r2s.items():
         print(f"   λ₁ = {lam:.0e} → mean R² = {r2s:.5f}")
 
-    print(f"\n🎯 Selected best λ₁: {best_lambda:.0e} (highest average validation R²)\n")
+    print(f"\n ** Selected best λ₁: {best_lambda:.0e} (highest average validation R²)\n")
     return best_lambda
 
 
