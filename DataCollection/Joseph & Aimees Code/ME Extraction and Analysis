@@ -1,0 +1,110 @@
+#----------ME Extraction from USA Dataset---------
+import pandas as pd
+
+def compute_me_percentiles(input_csv_path, output_csv_path):
+    # Read the data
+    df = pd.read_csv(input_csv_path, parse_dates=['eom'])
+    print("Dataset loaded")
+    
+
+    # Check necessary columns exist
+    if 'eom' not in df.columns or 'me' not in df.columns:
+        raise ValueError("CSV must contain 'eom' and 'me' columns")
+
+    # Group by 'eom' and calculate the percentiles
+    result = (
+        df.groupby('eom')['me']
+        .quantile([0.25, 0.30, 0.35])
+        .unstack(level=-1)
+        .reset_index()
+    )
+
+    # Rename columns for clarity
+    result.columns = ['date', 'me_25', 'me_30', 'me_35']
+
+    # Save to CSV
+    result.to_csv(output_csv_path, index=False)
+
+compute_me_percentiles(r"C:\Users\josep\Desktop\dsif_countries\countries_combined\USA.csv", 
+                       r"C:\Users\josep\Desktop\dsif_countries\me_stats.csv")
+
+#----------ME Analysis to See How Much Data Would Get Dropped at Different ME Levels----------
+
+import pandas as pd
+import os
+
+def compare_me_against_thresholds(folder_path, stats_csv_path, output_folder=None):
+    # Read ME thresholds
+    me_stats = pd.read_csv(stats_csv_path, parse_dates=['date'])
+    me_stats.columns = ['date', 'me_25', 'me_30', 'me_35']
+    me_stats.set_index('date', inplace=True)
+
+    # Prepare summary storage
+    summary_data = []
+    total_rows = {"me_25": 0, "me_30": 0, "me_35": 0}
+    total_dropped = {"me_25": 0, "me_30": 0, "me_35": 0}
+
+    # Loop through files in folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".csv"):
+            country = filename.replace(".csv", "")
+            df = pd.read_csv(os.path.join(folder_path, filename), parse_dates=['eom'])
+
+            # Drop rows with missing me
+            df = df.dropna(subset=['me'])
+            total_obs = len(df)
+
+            merged = df.merge(me_stats, left_on='eom', right_index=True, how='left')
+
+            drops_25 = (merged['me'] <= merged['me_25']).sum()
+            drops_30 = (merged['me'] <= merged['me_30']).sum()
+            drops_35 = (merged['me'] <= merged['me_35']).sum()
+
+            summary_data.append({
+                'country': country,
+                'total_obs': total_obs,
+                'drop_me_25': drops_25,
+                'pct_drop_me_25': drops_25 / total_obs * 100 if total_obs > 0 else 0,
+                'drop_me_30': drops_30,
+                'pct_drop_me_30': drops_30 / total_obs * 100 if total_obs > 0 else 0,
+                'drop_me_35': drops_35,
+                'pct_drop_me_35': drops_35 / total_obs * 100 if total_obs > 0 else 0
+            })
+
+            # Update cumulative tally
+            total_rows["me_25"] += total_obs
+            total_rows["me_30"] += total_obs
+            total_rows["me_35"] += total_obs
+            total_dropped["me_25"] += drops_25
+            total_dropped["me_30"] += drops_30
+            total_dropped["me_35"] += drops_35
+
+    # Create DataFrame from summary
+    summary_df = pd.DataFrame(summary_data)
+    print("Per-Country Drop Summary:")
+    print(summary_df)
+
+    # Save per-country summary if output folder specified
+    if output_folder:
+        summary_df.to_csv(os.path.join(output_folder, "per_country_me_drops.csv"), index=False)
+
+    # Cumulative drop summary
+    cumulative_summary = []
+    print("\nCumulative Drop Summary:")
+    for key in ['me_25', 'me_30', 'me_35']:
+        total_pct = (total_dropped[key] / total_rows[key]) * 100 if total_rows[key] > 0 else 0
+        cumulative_summary.append({
+            'threshold': key,
+            'total_rows': total_rows[key],
+            'total_dropped': total_dropped[key],
+            'pct_dropped': total_pct
+        })
+        print(f"Threshold {key}: Dropped {total_dropped[key]} of {total_rows[key]} rows ({total_pct:.2f}%)")
+
+    # Save cumulative summary if output folder specified
+    if output_folder:
+        pd.DataFrame(cumulative_summary).to_csv(os.path.join(output_folder, "cumulative_me_drops.csv"), index=False)
+
+compare_me_against_thresholds("C:/Users/josep/Desktop/dsif_countries/countries_combined", 
+"C:/Users/josep/Desktop/dsif_countries/me_stats.csv", 
+"C:/Users/josep/Desktop/dsif_countries")
