@@ -1,0 +1,668 @@
+#----------------- Installing --------------------
+# If needed:
+# !pip install pandas numpy torch scikit-learn
+
+
+#----------------- Importing --------------------#
+import os
+import pandas as pd
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import mean_squared_error
+from datetime import datetime
+import matplotlib.pyplot as plt
+from scipy.stats import spearmanr
+from glob import glob
+from collections import defaultdict
+import shap
+
+
+
+
+
+#----------------- Modifiables --------------------#
+TARGET = "excess_return_lead_winsorized"
+
+PREDICTORS_BASE = [  # The characteristics
+    'me_z', 'absacc_z', 'acc_z', 'agr_z', 'bm_z', 'cash_ass_z', 'debt_ass_z', 'cfp_z', 'mom_6m_z', 'pm_z',
+    'dolvol_z', 'dy_z', 'egr_z', 'ep_z', 'ill_z', 'mom_12m_z', 'lev_z', 'lgr_z', 'maxret_z', 'rev_1m_z',
+    'mom_6m_lag_z', 'pctacc_z', 'retvol_z', 'roe_z', 'sgr_z', 'sales_z', 'price_z', 'turn_z',
+    'cashdebt_z', 'chmom_6m_z', 'chpm_z', 'bm_ia_z', 'cfp_ia_z', 'mve_ia_z', 'chpm_ia_z', 'indmom_a_12m_z',
+    'stddolvol_z', 'stdturn_z', 'mvel1_z', 'sp_z'
+
+
+]
+
+HIDDEN_SIZE = 32 # (just one layer with 32 neurons)
+BATCH_SIZE = 5000
+EPOCHS = 100
+PATIENCE = 5
+LR = 0.01
+LAMBDA_FIXED = 1e-4  # Used if not tuning (weight decay can be this fixed lambda or the one tuned towards the end of the code)
+
+DATA_DIR = "./countries_cleaned"
+OUTPUT_DIR = "./results_pooled"
+
+#With Google Drive:
+#DATA_DIR = "/content/drive/MyDrive/countries_cleaned"
+#OUTPUT_DIR = "/content/drive/MyDrive/results_pooled"
+
+# -------- Augmentation Toggles (set True/False) -------
+
+USE_US_FACTORS = False
+USE_US_GAPS = False
+USE_US_MACRO = False
+USE_LOCAL_FACTORS = False
+
+USE_INTERACTIONS_US_FACTORS = False
+USE_INTERACTIONS_US_GAPS = False
+USE_INTERACTIONS_LOCAL_FACTORS = False  # Applies here in pooled model
+
+
+
+#-----------------------------------------------------------#
+#--------------- pooled_countries_function ----- NN1 -------#
+#-----------------------------------------------------------#
+from glob import glob
+
+
+############# Function with additional variables (augmented)
+def augment_predictors_pooled(df, base_predictors):
+    df['date'] = pd.to_datetime(df['date'])
+
+    # Set paths
+    factor_path = "./countries_factors_gaps"
+# with Google Drive
+    #factor_path = "/content/drive/MyDrive/countries_factors_gaps"
+    
+    macro_path = os.path.join(factor_path, "US_macro_variables_cleaned.xlsx")
+
+    new_predictors = list(base_predictors)
+
+    # Merge US macro variables
+    if USE_US_MACRO:
+        us_macro = pd.read_excel(macro_path, parse_dates=['date'])
+        us_macro.rename(columns={col: f"usm_{col}" for col in us_macro.columns if col != "date"}, inplace=True)
+        df = df.merge(us_macro, on="date", how="left")
+        new_predictors += [col for col in us_macro.columns if col != "date"]
+        print("+ US macro variables merged")
+
+    # Merge US factors
+    if USE_US_FACTORS:
+        usf = pd.read_csv(os.path.join(factor_path, "USA_factors.csv"), parse_dates=['date'])
+        usf.rename(columns={col: f"usf_{col}" for col in usf.columns if col != "date"}, inplace=True)
+        df = df.merge(usf, on="date", how="left")
+        new_predictors += [col for col in usf.columns if col != "date"]
+        print("+ US factors merged")
+
+    # Merge US characteristic gaps
+    if USE_US_GAPS:
+        gaps = pd.read_csv(os.path.join(factor_path, "USA_gaps.csv"), parse_dates=['date'])
+        gaps.rename(columns={col: f"gap_{col}" for col in gaps.columns if col != "date"}, inplace=True)
+        df = df.merge(gaps, on="date", how="left")
+        new_predictors += [col for col in gaps.columns if col != "date"]
+        print("+ US characteristic gaps merged")
+
+    # Merge local factors per country
+    if USE_LOCAL_FACTORS:
+        for ctry in df['country'].unique():
+            local_path = os.path.join(factor_path, f"{ctry}_factors.csv")
+            if os.path.exists(local_path):
+                local = pd.read_csv(local_path, parse_dates=['date'])
+                local['country'] = ctry  # tag the country
+                df = df.merge(local, on=["date", "country"], how="left")
+        local_cols = [col for col in df.columns if col.endswith("_factor") and col not in new_predictors]
+        new_predictors += local_cols
+        print("+ Local factors merged")
+
+    # Matched interactions
+    char_vars = base_predictors
+
+    if USE_INTERACTIONS_US_FACTORS:
+        for char in char_vars:
+            usf_col = f"usf_{char.replace('_z', '')}_factor"
+            if usf_col in df.columns:
+                inter_col = f"{char}_x_{usf_col}"
+                df[inter_col] = df[char] * df[usf_col]
+                new_predictors.append(inter_col)
+        print("+ Matched interactions with US factors created")
+
+    if USE_INTERACTIONS_US_GAPS:
+        for char in char_vars:
+            gap_col = f"gap_{char.replace('_z', '')}_gap"
+            if gap_col in df.columns:
+                inter_col = f"{char}_x_{gap_col}"
+                df[inter_col] = df[char] * df[gap_col]
+                new_predictors.append(inter_col)
+        print("+ Matched interactions with US gaps created")
+
+    if USE_INTERACTIONS_LOCAL_FACTORS:
+        for char in char_vars:
+            local_col = f"{char.replace('_z', '')}_factor"
+            if local_col in df.columns:
+                inter_col = f"{char}_x_{local_col}"
+                df[inter_col] = df[char] * df[local_col]
+                new_predictors.append(inter_col)
+        print("+ Matched interactions with local factors created")
+
+    return df, new_predictors
+
+
+
+
+
+
+
+############# Function with fixed Lambda
+all_weights = []
+def run_pooled_global_model(use_tuned_lambda=True, estimator=1):
+    """
+    Trains a neural network on pooled stock return data across all countries.
+    - Adds country dummies (USA is reference)
+    - Uses expanding window logic (train → val → test by year)
+    - Can use fixed or tuned lambda (penalty)
+    - Outputs predictions and performance metrics
+    """
+
+    # ---------- Load & Preprocess All Countries ----------
+    df = load_all_countries()
+    df['date'] = pd.to_datetime(df['date'])
+    df.sort_values(['id', 'date'], inplace=True)
+    df['year'] = df['date'].dt.year
+
+    print("+ Loaded and sorted all countries' data")
+    print(f"--> Total rows: {len(df):,}, from {df['year'].min()} to {df['year'].max()}")
+    print(f"* Unique countries: {df['country'].nunique()}, examples: {df['country'].unique()[:5]}")
+
+
+
+    # Target: next month’s return
+    #df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    df['returns_next_month'] = df[TARGET]
+
+
+    # ---------- Augment Predictors First ----------
+    df, augmented_predictors = augment_predictors_pooled(df, PREDICTORS_BASE)
+    print(f"- Augmented predictors: {len(augmented_predictors)} total")
+    print("- Example predictors:", augmented_predictors[:10])
+
+
+    # --------- THEN Add Country Fixed Effects via dummies ---------
+    df = pd.get_dummies(df, columns=['country'], drop_first=True)  # drop USA dummy
+    country_dummies = [col for col in df.columns if col.startswith("country_")]
+    predictors = augmented_predictors + country_dummies
+
+
+
+    # Fill missing predictors, drop rows missing target
+    df[predictors] = df[predictors].fillna(0)
+    #df.dropna(subset=predictors + ['returns_next_month'], inplace=True)
+
+    print(f"+ Combined shape: {df.shape}, years {df['year'].min()}–{df['year'].max()}")
+
+    # ---------- Choose Lambda (Fixed or Tuned) ----------
+    if use_tuned_lambda:
+        best_lambda = find_best_lambda_for_pooled(df.copy(), predictors)
+        
+    else:
+        best_lambda = LAMBDA_FIXED  # from modifiables
+    print(f"+ Using λ₁ = {best_lambda:.0e}")
+
+    # ---------- Expanding Window Setup ----------
+    results = []
+    metrics_list = []
+
+    years = sorted(df['year'].unique())
+    initial_train_years = int(len(years) * 0.3)
+    validation_years = max(1, int(len(years) * 0.2))
+
+    # ---------- Year-by-Year Expanding Window ----------
+    print(f"... Starting expanding-window training loop across {len(years)} years")
+    print(f"- Initial training: first {initial_train_years} years")
+    print(f"- Validation window: {validation_years} years")
+    print(f"... Total iterations (test years): {len(years) - (initial_train_years + validation_years)}")
+
+    for test_start_idx in range(initial_train_years + validation_years, len(years)):
+        # Define train, val, test periods
+        train_end = years[test_start_idx - validation_years - 1]
+        val_start = years[test_start_idx - validation_years]
+        val_end = years[test_start_idx - 1]
+        test_year = years[test_start_idx]
+
+        train = df[df['year'] <= train_end]
+        val = df[(df['year'] >= val_start) & (df['year'] <= val_end)]
+        test = df[df['year'] == test_year]
+
+        if train.empty or val.empty or test.empty:
+            continue
+
+
+        # --------Extract features & target arrays for train, val, and test -----------
+
+        # Safety: copy before modifying
+        train = train.copy()
+        val = val.copy()
+        test = test.copy()
+
+        # Ensure all predictors are numeric
+        train.loc[:, predictors] = train[predictors].apply(pd.to_numeric, errors='coerce')
+        val.loc[:, predictors] = val[predictors].apply(pd.to_numeric, errors='coerce')
+        test.loc[:, predictors] = test[predictors].apply(pd.to_numeric, errors='coerce')
+
+
+        # Drop rows with any remaining NaNs
+        train = train.dropna(subset=predictors + ['returns_next_month'])
+        val = val.dropna(subset=predictors + ['returns_next_month'])
+        test.dropna(subset=predictors + ['returns_next_month'], inplace=True)
+
+
+        # Convert to float32 NumPy arrays (guaranteed safe for torch.tensor)
+        X_train = train[predictors].astype(np.float32).values
+        y_train = train['returns_next_month'].astype(np.float32).values
+
+        X_val = val[predictors].astype(np.float32).values
+        y_val = val['returns_next_month'].astype(np.float32).values
+
+        X_test = test[predictors].astype(np.float32).values
+        y_test = test['returns_next_month'].astype(np.float32).values
+
+        # ---------- Model Definition ----------
+        class GlobalNN(nn.Module):
+            def __init__(self, input_dim):
+                super().__init__()
+                self.model = nn.Sequential(
+                    nn.Linear(input_dim, HIDDEN_SIZE),
+                    nn.BatchNorm1d(HIDDEN_SIZE),
+                    nn.ReLU(),
+                    nn.Linear(HIDDEN_SIZE, 1)
+                )
+            def forward(self, x): return self.model(x)
+
+        model = GlobalNN(len(predictors))
+        optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=best_lambda)
+        criterion = nn.MSELoss()
+
+        # ---------- Training with Early Stopping ----------
+        train_loader = DataLoader(
+            TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                          torch.tensor(y_train, dtype=torch.float32)),
+            batch_size=BATCH_SIZE, shuffle=True)
+
+        best_model = None
+        best_val_loss = np.inf
+        patience_counter = 0
+
+        for epoch in range(EPOCHS):
+            model.train()
+            for xb, yb in train_loader:
+                optimizer.zero_grad()
+                preds = model(xb).squeeze()
+                loss = criterion(preds, yb)
+                loss.backward()
+                optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                val_preds = model(torch.tensor(X_val, dtype=torch.float32)).squeeze().numpy()
+                val_loss = mean_squared_error(y_val, val_preds)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_model = model.state_dict()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= PATIENCE:
+                    break
+
+        # ---------- Testing ----------
+        model.load_state_dict(best_model)
+        model.eval()
+        with torch.no_grad():
+            preds = model(torch.tensor(X_test, dtype=torch.float32)).squeeze().numpy()
+
+
+        # ---------- Extract and save input weights ----------
+        with torch.no_grad():
+            input_weights = model.model[0].weight.detach().cpu().numpy()  # shape: (hidden, predictors)
+            mean_weights = input_weights.mean(axis=0)
+
+        weights_row = pd.DataFrame([dict(zip(predictors, mean_weights))])
+        weights_row.insert(0, "year", test_year)
+        all_weights.append(weights_row)
+
+
+        # Save predictions for the year
+        test = test.copy()
+        test['pooled_pred'] = preds
+        results.append(test[['id', 'date', 'pooled_pred', 'returns_next_month']])
+
+        # ==================== SHAP 分析模块 ====================
+        if estimator > 0:
+            try:
+                shap_values_list = []
+                for _ in range(estimator):
+                    bg_idx = np.random.choice(len(X_train), size=min(100, len(X_train)), replace=False)
+                    background = torch.tensor(X_train[bg_idx].astype(np.float32))
+                    X_test_tensor = torch.tensor(X_test.astype(np.float32))
+        
+                    explainer = shap.DeepExplainer(model, background)
+                    shap_vals = explainer.shap_values(X_test_tensor)
+                    if isinstance(shap_vals, list):
+                        shap_vals = shap_vals[0]
+        
+                    shap_values_list.append(shap_vals)
+        
+                if len(shap_values_list) > 0:
+                    shap_avg = np.mean(np.stack(shap_values_list), axis=0)
+                    shap_mean_importance = np.abs(shap_avg).mean(axis=0).flatten()
+        
+                    shap_dir = os.path.join(OUTPUT_DIR, "shap", str(test_year))
+                    os.makedirs(shap_dir, exist_ok=True)
+                    np.save(os.path.join(shap_dir, "shap_values.npy"), shap_avg)
+        
+                    importance_df = pd.DataFrame({
+                        'feature': predictors,
+                        'mean_abs_shap': shap_mean_importance
+                    }).sort_values(by='mean_abs_shap', ascending=False)
+                    importance_df.to_csv(os.path.join(shap_dir, 'shap_importance.csv'), index=False)
+        
+                    # 可视化 Top10 特征
+                    plt.figure(figsize=(10, 5))
+                    plt.barh(importance_df['feature'][:10][::-1], importance_df['mean_abs_shap'][:10][::-1])
+                    plt.title(f"Top 10 SHAP Features ({test_year})")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(shap_dir, f"shap_bar_top10.png"))
+                    plt.close()
+        
+                    print(f"✅ SHAP saved for {test_year} → Top feature: {importance_df.iloc[0]['feature']}")
+                else:
+                    print(f"❌ SHAP skipped for {test_year}: empty shap_values_list")
+        
+            except Exception as e:
+                print(f"❌ SHAP failed for year {test_year}: {e}")
+
+
+        r2 = 1 - np.sum((y_test - preds) ** 2) / np.sum(y_test ** 2)
+        mse = mean_squared_error(y_test, preds)
+
+        metrics_list.append({
+            'year': test_year,
+            'test_r2': r2,
+            'test_mse': mse
+        })
+
+        print(f"+ Test year {test_year}: R² = {r2:.4f}, MSE = {mse:.6f}")
+
+    # ---------- Global Metrics ----------
+    final_df = pd.concat(results)
+    y_true = final_df['returns_next_month'].values
+    y_pred = final_df['pooled_pred'].values
+
+
+    # ---------- Save Outputs ----------
+    os.makedirs("results_pooled", exist_ok=True)
+    final_df.to_csv("results_pooled/pooled_predictions.csv", index=False)
+    pd.DataFrame(metrics_list).to_csv("results_pooled/per_year_metrics.csv", index=False)
+
+    if all_weights:
+        weights_df = pd.concat(all_weights, ignore_index=True).drop(columns='year')
+        avg_weights = weights_df.mean().to_frame().T
+        avg_weights.to_csv("results_pooled/pooled_input_weights.csv", index=False)
+        print("+ Saved pooled input weights to pooled_input_weights.csv")
+
+
+    # ---------- Calculate Summary Statistics ----------
+    from scipy.stats import spearmanr
+
+    summary = {}
+
+    # Out-of-sample R² (OOR²)
+    global_r2 = 1 - np.sum((y_true - y_pred) ** 2) / np.sum(y_true ** 2)
+    summary['pooled_oor2'] = global_r2
+    print(f"\n* Global Pooled OOR²: {global_r2:.5f}")
+
+    # Sharpe ratio (ranked based on predicted returns, calculated for same portfolio of actual stocks)
+    long_short_returns = []
+    for _, g in final_df.groupby('date'):
+        g = g.sort_values('pooled_pred')
+        if len(g) < 10: continue
+        top = g.iloc[-len(g)//10:]
+        bottom = g.iloc[:len(g)//10]
+        long_short_returns.append(top['returns_next_month'].mean() - bottom['returns_next_month'].mean())
+    sharpe = np.mean(long_short_returns) / np.std(long_short_returns) * np.sqrt(12)
+    summary['pooled_sharpe'] = sharpe
+    print(f"+ Global Sharpe Ratio: {sharpe:.5f}")
+
+    # Decile score distance
+    summary['pooled_decile_score_distance'] = np.mean(long_short_returns)
+    print(f"+ Global Decile Score Distance: {summary['pooled_decile_score_distance']:.5f}")
+
+    # Spearman rank correlation
+    rank_corrs = [
+        spearmanr(g['pooled_pred'], g['returns_next_month'])[0]
+        for _, g in final_df.groupby('date')
+        if g['returns_next_month'].nunique() > 1
+    ]
+    summary['pooled_rank_corr'] = np.nanmean(rank_corrs)
+    print(f"+ Global Spearman Rank Correlation: {summary['pooled_rank_corr']:.5f}")
+
+
+    # Save final summary
+    pd.DataFrame([summary]).to_csv("results_pooled/pooled_summary_metrics.csv", index=False)
+    print("+ Saved pooled global summary metrics.")
+
+
+#----------- Load Data -----------------
+
+def load_all_countries(data_dir=DATA_DIR):
+    dfs = []
+    all_predictors = set(PREDICTORS_BASE)  # Start from your base predictors
+
+
+    # --- Pass 1: collect all unique predictors ---
+    all_predictors = set()
+    for file in glob(os.path.join(data_dir, "*_cleaned.csv")):
+        df = pd.read_csv(file)
+        predictors = [col for col in df.columns if col.endswith("_z")]
+        all_predictors.update(predictors)
+
+    all_predictors = sorted(all_predictors)
+    print(f"+ Total predictors used across all countries: {len(all_predictors)}")
+
+    # --- Pass 2: load each file and fill missing predictors ---
+    for file in glob(os.path.join(data_dir, "*_cleaned.csv")):
+        df = pd.read_csv(file)
+        country_code = df['country'].iloc[0] if 'country' in df.columns else os.path.basename(file).split("_")[0]
+
+        missing_cols = [col for col in all_predictors if col not in df.columns]
+        for col in missing_cols:
+            df[col] = np.nan  # add missing predictors
+
+        # Keep only relevant columns
+        df = df[["id", "date", "country"] + all_predictors + [TARGET]]
+        dfs.append(df)
+
+        print(f"--> Processed {country_code}: {df.shape[0]} rows, {len(missing_cols)} missing predictors added")
+
+    combined_df = pd.concat(dfs, ignore_index=True)
+    print(f"** Combined pooled dataset shape: {combined_df.shape}")
+    return combined_df
+
+
+
+
+
+
+
+
+
+############# Function with tuning Lambda
+def find_best_lambda_for_pooled(df, predictors, lambda_grid=[1e-5, 1e-3]):
+    """
+    Tune λ₁ (weight decay) by:
+    - Expanding the training set
+    - Shrinking the validation set (1 year at a time)
+    - Evaluating average validation R² across lambda values
+    """
+
+    #------------------ Preprocessing ------------------#
+    # Create prediction target
+    #df['returns_next_month'] = df.groupby('id')['returns_winsorized'].shift(-1)
+    df['returns_next_month'] = df[TARGET]
+
+    # Fill missing values in predictors (e.g. 0 or other logic)
+    df[predictors] = df[predictors].fillna(0)
+
+    # Drop rows that can't be used
+    df.dropna(subset=predictors + ['returns_next_month'], inplace=True)
+
+    # Add year column for splitting
+    df['year'] = df['date'].dt.year
+    years = sorted(df['year'].unique())
+    total_years = len(years)
+
+    #------------------ Validation Split Setup ------------------#
+    # Use 30% of years for training, next 20% for validation
+    train_years = int(total_years * 0.3)
+    val_years = max(1, int(total_years * 0.2))
+
+    # Define limits of training/validation window
+    initial_train_end = years[train_years - 1]
+    final_val_year = years[train_years + val_years - 1]
+
+    print("... Starting λ₁ tuning process (Weight Decay Grid Search)")
+    print("------------------------------------------------------------")
+    print(f"--> Total years in data: {total_years}")
+    print(f"- Training starts with: first {train_years} years")
+    print(f"- Validation shrinks over: next {val_years} years")
+    print(f"-- Using expanding train set and 1-year rolling validation")
+    print(f"** Trying λ₁ values: {lambda_grid}")
+    print("------------------------------------------------------------\n")
+
+
+    # To store validation R²s for each lambda
+    lambda_r2s = defaultdict(list)
+
+    #------------------ Shrinking Validation Loop ------------------#
+    for val_year in years[train_years : train_years + val_years]:
+
+        print(f"\n... Validating on year: {val_year} | Training ≤ {val_year - 1}")
+
+        # Train set includes all data before val_year
+        train = df[df['year'] < val_year]
+        val = df[df['year'] == val_year]
+
+        if train.empty or val.empty:
+            continue
+
+        # Safety: copy before modifying
+        train = train.copy()
+        val = val.copy()
+        # Ensure all predictors are numeric
+        train.loc[:, predictors] = train[predictors].apply(pd.to_numeric, errors='coerce')
+        val.loc[:, predictors] = val[predictors].apply(pd.to_numeric, errors='coerce')
+
+
+        # Drop rows with any remaining NaNs
+        train = train.dropna(subset=predictors + ['returns_next_month'])
+        val = val.dropna(subset=predictors + ['returns_next_month'])
+
+        # Convert to float32 NumPy arrays (guaranteed safe for torch.tensor)
+        X_train = train[predictors].astype(np.float32).values
+        y_train = train['returns_next_month'].astype(np.float32).values
+
+        X_val = val[predictors].astype(np.float32).values
+        y_val = val['returns_next_month'].astype(np.float32).values
+
+
+
+        #------------------ Try Each λ₁ Value ------------------#
+        for lam in lambda_grid:
+            # Define simple 1-hidden-layer model
+            class GlobalNN(nn.Module):
+                def __init__(self, input_dim):
+                    super().__init__()
+                    self.model = nn.Sequential(
+                        nn.Linear(input_dim, HIDDEN_SIZE),
+                        nn.BatchNorm1d(HIDDEN_SIZE),
+                        nn.ReLU(),
+                        nn.Linear(HIDDEN_SIZE, 1)
+                    )
+                def forward(self, x): return self.model(x)
+
+            model = GlobalNN(len(predictors))
+            optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=lam)
+            criterion = nn.MSELoss()
+
+            # DataLoader for mini-batch training
+            loader = DataLoader(
+                TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                              torch.tensor(y_train, dtype=torch.float32)),
+                batch_size=BATCH_SIZE, shuffle=True
+            )
+
+            best_r2 = -np.inf
+            best_epoch = 0
+            patience_counter = 0
+
+
+            #------------------ Training with Early Stopping ------------------#
+            for epoch in range(EPOCHS):
+                model.train()
+                for xb, yb in loader:
+                    optimizer.zero_grad()
+                    preds = model(xb).squeeze()
+                    loss = criterion(preds, yb)
+                    loss.backward()
+                    optimizer.step()
+
+                # Evaluate on validation set
+                model.eval()
+                with torch.no_grad():
+                    preds = model(torch.tensor(X_val, dtype=torch.float32)).squeeze().numpy()
+                    ss_res = np.sum((y_val - preds) ** 2)
+                    ss_tot = np.sum(y_val ** 2)
+                    val_r2 = 1 - ss_res / ss_tot
+
+                # Early stopping logic
+                if val_r2 > best_r2:
+                    best_r2 = val_r2
+                    best_epoch = epoch + 1  # 1-based index
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= PATIENCE:
+                        break
+
+            # Save best R² for this λ₁
+            lambda_r2s[lam].append(best_r2)
+            print(f"   • λ₁ = {lam:.0e} → Best validation R² = {best_r2:.5f} (at epoch {best_epoch} / out of total {epoch + 1}) epochs")
+
+    #------------------ Final Lambda Selection ------------------#
+    # Average validation R² for each λ₁
+    avg_r2s = {lam: np.mean(r2s) for lam, r2s in lambda_r2s.items()}
+    best_lambda = max(avg_r2s, key=avg_r2s.get)
+
+    # Show the results
+    print(f"\n** Avg R² by λ₁:")
+    for lam, r2 in avg_r2s.items():
+        print(f"   λ₁ = {lam:.0e} → Avg R² = {r2:.5f}")
+    print(f"\n** Best λ₁: {best_lambda:.0e}")
+
+    return best_lambda
+
+
+
+#------ master switch between tuned and fixed lambda --------------
+if __name__ == "__main__":
+    pooled_mode = "tuned"  # "tuned" or "fixed"
+
+    if pooled_mode == "fixed":
+        run_pooled_global_model(use_tuned_lambda=False)
+    elif pooled_mode == "tuned":
+        run_pooled_global_model(use_tuned_lambda=True)
+    else:
+        print("✖ Invalid pooled_mode. Choose 'fixed' or 'tuned'.")
