@@ -339,7 +339,18 @@ def run_pooled_global_model(use_tuned_lambda=True, estimator=1):
         test['pooled_pred'] = preds
         results.append(test[['id', 'date', 'pooled_pred', 'returns_next_month']])
 
-        # ==================== SHAP 分析模块 ====================
+        r2 = 1 - np.sum((y_test - preds) ** 2) / np.sum(y_test ** 2)
+        mse = mean_squared_error(y_test, preds)
+
+        metrics_list.append({
+            'year': test_year,
+            'test_r2': r2,
+            'test_mse': mse
+        })
+
+        print(f"+ Test year {test_year}: R² = {r2:.4f}, MSE = {mse:.6f}")
+
+        # ==================== SHAP  ====================
         if estimator > 0:
             try:
                 shap_values_list = []
@@ -369,7 +380,7 @@ def run_pooled_global_model(use_tuned_lambda=True, estimator=1):
                     }).sort_values(by='mean_abs_shap', ascending=False)
                     importance_df.to_csv(os.path.join(shap_dir, 'shap_importance.csv'), index=False)
         
-                    # 可视化 Top10 特征
+                    # visualize Top10 char
                     plt.figure(figsize=(10, 5))
                     plt.barh(importance_df['feature'][:10][::-1], importance_df['mean_abs_shap'][:10][::-1])
                     plt.title(f"Top 10 SHAP Features ({test_year})")
@@ -384,17 +395,6 @@ def run_pooled_global_model(use_tuned_lambda=True, estimator=1):
             except Exception as e:
                 print(f"❌ SHAP failed for year {test_year}: {e}")
 
-
-        r2 = 1 - np.sum((y_test - preds) ** 2) / np.sum(y_test ** 2)
-        mse = mean_squared_error(y_test, preds)
-
-        metrics_list.append({
-            'year': test_year,
-            'test_r2': r2,
-            'test_mse': mse
-        })
-
-        print(f"+ Test year {test_year}: R² = {r2:.4f}, MSE = {mse:.6f}")
 
     # ---------- Global Metrics ----------
     final_df = pd.concat(results)
