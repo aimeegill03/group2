@@ -21,6 +21,8 @@ import shap
 #----------------- modifiables --------------------
 TARGET = "excess_return_lead_winsorized"
 
+####### Change the estimator when it is needed#####
+
 Estimator = 2 # Number of repeating NN model
 NN1_HIDDEN_SIZE = 32 #1 hidden layer with 32 neurons
 patience = 5 #Stop early if the model doesn't improve after this number of iteration
