@@ -151,13 +151,13 @@ def run_enet_expanding_window(df, predictors, target, country, output_dir,
         # Summary metrics
         sharpe_ratio = (np.mean(long_short_returns) / np.std(long_short_returns)) * np.sqrt(12) if long_short_returns else np.nan
         avg_decile_score = np.mean(decile_spreads) if decile_spreads else np.nan
-        avg_oos_r2 = np.mean(oos_r2_list) if oos_r2_list else np.nan
+        oos_r2 = np.mean(oos_r2_list) if oos_r2_list else np.nan
         avg_rank_corr = np.nanmean(rank_corrs) if rank_corrs else np.nan
 
         # Save summary
         summary_df = pd.DataFrame([{
             'country': country,
-            'avg_oos_r2': avg_oos_r2,
+            'oos_r2': oos_r2,
             'sharpe_ratio': sharpe_ratio,
             'avg_rank_correlation': avg_rank_corr,
             'avg_decile_score_distance': avg_decile_score
