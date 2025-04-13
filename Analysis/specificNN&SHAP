@@ -843,3 +843,56 @@ if __name__ == "__main__":
 
 
     merge_all_summary_metrics()
+
+
+
+#########SHAP files#####################
+for root, dirs, files in os.walk("./results_pooled3"):
+    for f in files:
+        if f.endswith("_avg.csv") and "shap_" in f:
+            print(os.path.join(root, f))
+########### crisis prediction###################
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+
+FOLDER_PATH = "./results_pooled3"
+crisis_years = [2008, 2020]
+
+shap_data = []
+
+for root, dirs, files in os.walk(FOLDER_PATH):
+    for file in files:
+        if file.endswith("_avg.csv") and "shap_" in file:
+            year = int(file.split("_")[1])
+            country = os.path.basename(root).replace("_results", "")
+            is_crisis = int(year in crisis_years)
+
+            df = pd.read_csv(os.path.join(root, file))
+            df['year'] = year
+            df['crisis'] = is_crisis
+            df['country'] = country
+
+            shap_data.append(df)
+
+
+shap_all = pd.concat(shap_data)
+
+# ---------- Example of analysis: crisis vs. non-crisis average number of SHAP features inconsistent ----------
+
+avg_shap = shap_all.groupby(['feature', 'crisis'])['mean_abs_shap'].mean().unstack()
+
+# Visualization: inconsistencies in the number of characteristics features that are more important in times of crisis
+avg_shap['diff'] = avg_shap[1] - avg_shap[0]
+avg_shap = avg_shap.sort_values('diff', ascending=False).dropna()
+
+top_features = avg_shap.head(10)
+
+# Plot
+plt.figure(figsize=(8, 5))
+plt.barh(top_features.index, top_features['diff'])
+plt.gca().invert_yaxis()
+plt.title("Top SHAP Increase During Crisis (Crisis - Non-Crisis)")
+plt.xlabel("Δ mean(|SHAP|)")
+plt.tight_layout()
+plt.show()
