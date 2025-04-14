@@ -1,0 +1,113 @@
+import os
+import pandas as pd
+
+def analyze_missing_across_countries(folder_path, threshold=0.5):
+    """
+    Goes through CSV files in a folder and computes:
+    1. How many countries have each variable with > threshold missing
+    2. A dictionary mapping each variable to the list of countries where it's mostly missing
+    3. A dictionary mapping each country to its number of rows
+
+    Parameters:
+    -----------
+    folder_path : str
+        Path to the folder containing country-level CSV files.
+    threshold : float
+        Proportion of missing values (e.g., 0.5 for 50%).
+
+    Returns:
+    --------
+    summary_df : DataFrame
+        Rows: variables, Column: num_countries_over_50pct_missing
+
+    missing_dict : dict
+        Keys: variable names
+        Values: list of country names where missingness > threshold
+
+    country_row_counts : dict
+        Keys: country name
+        Values: number of rows in the corresponding file
+    """
+    # Dict to track where each variable is mostly missing
+    missing_dict = {}
+
+    # Dict to count number of rows per country
+    country_row_counts = {}
+
+    # Loop through all CSV files
+    for file in os.listdir(folder_path):
+
+        if file.endswith(".csv"):
+            country_name = os.path.splitext(file)[0]
+            file_path = os.path.join(folder_path, file)
+            df = pd.read_csv(file_path)
+
+            # Count number of rows in this country's file
+            country_row_counts[country_name] = len(df)
+
+            # Compute missingness ratio
+            missing_ratios = df.isna().mean()
+
+            for var, ratio in missing_ratios.items():
+                if ratio > threshold:
+                    if var not in missing_dict:
+                        missing_dict[var] = []
+                    missing_dict[var].append(country_name)
+
+    # Build summary DataFrame
+    summary_df = pd.DataFrame({
+        'variable': list(missing_dict.keys()),
+        'num_countries_over_50pct_missing': [len(countries) for countries in missing_dict.values()]
+    }).set_index('variable')
+
+    return summary_df, missing_dict, country_row_counts
+
+import pandas as pd
+from collections import defaultdict
+
+def combine_missing_and_row_counts(sum_d, row_counts):
+    """
+    Creates a final table showing, for each country:
+    - Number of variables with >50% missing values
+    - Number of total rows
+
+    Parameters:
+    -----------
+    sum_d : dict
+        variable ➝ list of countries with >50% missing values
+    row_counts : dict
+        country ➝ number of rows in that country's dataset
+
+    Returns:
+    --------
+    DataFrame with columns:
+        - country
+        - num_vars_over_50pct_missing
+        - num_rows
+    """
+    # Step 1: Count how many variables are missing for each country
+    var_count_by_country = defaultdict(int)
+
+    for var, countries in sum_d.items():
+        for country in countries:
+            var_count_by_country[country] += 1
+
+    # Step 2: Build DataFrame from both dicts
+    df = pd.DataFrame.from_dict(var_count_by_country, orient='index', columns=['num_vars_over_50pct_missing'])
+    df.index.name = 'country'
+
+    row_df = pd.DataFrame.from_dict(row_counts, orient='index', columns=['num_rows'])
+    row_df.index.name = 'country'
+
+    # Step 3: Merge them together
+    final_df = df.merge(row_df, left_index=True, right_index=True)
+
+    return final_df.sort_values('num_vars_over_50pct_missing', ascending=False)
+
+# Example use:
+# folder_path = r"C:\Users\josep\Desktop\dsif_countries\countries_cleaned"
+# sum, sum_d, rows = analyze_missing_across_countries(folder_path)
+# print(sum)
+# print(sum_d)
+# country_missing_table = combine_missing_and_row_counts(sum_d, rows)
+print(country_missing_table)
