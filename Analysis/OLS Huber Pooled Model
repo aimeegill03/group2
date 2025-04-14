@@ -1,24 +1,53 @@
-#imports
+import os
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression
+from glob import glob
 from sklearn.linear_model import HuberRegressor
-from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
+from scipy.stats import spearmanr
 
+# Paths --> Change if running elsewhere
+DATA_DIR = "/content/drive/MyDrive/testing_countries"
+OUTPUT_DIR = "/content/drive/MyDrive/OLS_Huber_Pooled_Outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def run_pooled_huber(
-    df,
-    feature_cols,
-    target_col,
-    market_col='country',
-    time_col='date',
-    id_col='id'
-):
+# Defininf X & Y Variables
+PREDICTORS_BASE = [
+    'me_z', 'absacc_z', 'acc_z', 'agr_z', 'bm_z', 'cash_ass_z', 'debt_ass_z',
+    'cfp_z', 'mom_6m_z', 'pm_z', 'dolvol_z', 'dy_z', 'egr_z', 'ep_z', 'ill_z',
+    'mom_12m_z', 'lev_z', 'lgr_z', 'maxret_z', 'rev_1m_z', 'mom_6m_lag_z',
+    'pctacc_z', 'retvol_z', 'roe_z', 'sgr_z', 'sales_z', 'price_z', 'turn_z',
+    'cashdebt_z', 'chmom_6m_z', 'chpm_z', 'bm_ia_z', 'cfp_ia_z', 'mve_ia_z',
+    'chpm_ia_z', 'indmom_a_12m_z', 'stddolvol_z', 'stdturn_z', 'mvel1_z', 'sp_z'
+]
 
+TARGET = "excess_return_lead_winsorized"
+
+# Pooling data 
+
+def load_pooled_data(data_dir=DATA_DIR):
+    dfs = []
+    for file in glob(os.path.join(data_dir, "*_cleaned.csv")):
+        df = pd.read_csv(file)
+        if 'country' not in df.columns:
+            df['country'] = os.path.basename(file).split("_")[0]
+        dfs.append(df)
+    combined_df = pd.concat(dfs, ignore_index=True)
+    print(f"Loaded pooled data: {combined_df.shape}")
+    return combined_df
+
+# Define the function 
+
+def run_pooled_huber_full(df, feature_cols, target_col=TARGET, output_dir=OUTPUT_DIR):
     df = df.copy()
-    df[time_col] = pd.to_datetime(df[time_col])
-    df['year'] = df[time_col].dt.year
+    df['date'] = pd.to_datetime(df['date'])
+    df['year'] = df['date'].dt.year
+
+    df = pd.get_dummies(df, columns=['country'], drop_first=True)
+    feature_cols = [col for col in df.columns if col in feature_cols or col.startswith("country_")]
+
+    df[feature_cols] = df[feature_cols].fillna(0)
+    df = df.dropna(subset=[target_col])
 
     results = []
     r2_stats = []
@@ -28,51 +57,87 @@ def run_pooled_huber(
     n_train = int(n_years * 0.3)
     n_val = int(n_years * 0.2)
 
-    print("\n===== Starting Pooled Huber Model with Validation =====")
+    print("\n===== Starting Pooled Huber Model with NN-style Metrics =====")
 
     for i in range(n_train + n_val, n_years):
         train_years = all_years[:i - n_val]
         val_years = all_years[i - n_val:i]
         test_year = all_years[i]
 
-        train_data = df[df['year'].isin(train_years)]
-        val_data = df[df['year'].isin(val_years)]
-        test_data = df[df['year'] == test_year]
+        train = df[df['year'].isin(train_years)]
+        val = df[df['year'].isin(val_years)]
+        test = df[df['year'] == test_year]
 
-        train_data = train_data.dropna(subset=feature_cols + [target_col])
-        val_data = val_data.dropna(subset=feature_cols + [target_col])
-        test_data = test_data.dropna(subset=feature_cols + [target_col])
-
-        if train_data.empty or val_data.empty or test_data.empty:
-            print(f"Skipped {test_year} (insufficient data)")
+        if train.empty or val.empty or test.empty:
+            print(f"Skipping {test_year} (insufficient data)")
             continue
 
-        X_train = train_data[feature_cols].values
-        y_train = train_data[target_col].values
-        X_val = val_data[feature_cols].values
-        y_val = val_data[target_col].values
-        X_test = test_data[feature_cols].values
-        y_test = test_data[target_col].values
-
-        # Standardize all sets
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
-        X_test_scaled = scaler.transform(X_test)
+        X_train = scaler.fit_transform(train[feature_cols].values)
+        X_test = scaler.transform(test[feature_cols].values)
+        y_train = train[target_col].values
+        y_test = test[target_col].values
 
         model = HuberRegressor(max_iter=1000)
-        model.fit(X_train_scaled, y_train)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
 
-        y_pred = model.predict(X_test_scaled)
+        r2 = 1 - ((y_test - y_pred) ** 2).sum() / (y_test ** 2).sum()
+        r2_stats.append({'year': test_year, 'R2_oos': r2})
 
-        r2_oos = 1 - ((y_test - y_pred) ** 2).sum() / (y_test ** 2).sum()
-        r2_stats.append({'year': test_year, 'R2_oos': r2_oos})
+        test = test.copy()
+        test['pooled_pred'] = y_pred
+        results.append(test[['id', 'date', 'pooled_pred', target_col]])
 
-        test_data = test_data.copy()
-        test_data['predicted_ret'] = y_pred
-        results.append(test_data[[time_col, 'year', id_col, market_col, target_col, 'predicted_ret']])
+    if not results:
+        print("No test results generated.")
+        return
 
-    predictions_df = pd.concat(results).sort_values([market_col, time_col, id_col]).reset_index(drop=True)
-    r2_summary_df = pd.DataFrame(r2_stats)
+    pred_df = pd.concat(results)
+    pred_df.to_csv(os.path.join(output_dir, "pooled_predictions.csv"), index=False)
 
-    return predictions_df, r2_summary_df
+    pd.DataFrame(r2_stats).to_csv(os.path.join(output_dir, "per_year_metrics.csv"), index=False)
+
+    # === Summary Metrics ===
+    y_true = pred_df[target_col].values
+    y_pred = pred_df['pooled_pred'].values
+
+    oor2 = 1 - np.sum((y_true - y_pred) ** 2) / np.sum(y_true ** 2)
+
+    decile_returns = []
+    for date, group in pred_df.groupby('date'):
+        group = group.sort_values('pooled_pred')
+        if len(group) < 10: continue
+        decile = len(group) // 10
+        top = group.iloc[-decile:]
+        bottom = group.iloc[:decile]
+        decile_returns.append(top[target_col].mean() - bottom[target_col].mean())
+    sharpe = np.mean(decile_returns) / np.std(decile_returns) * np.sqrt(12) if len(decile_returns) > 1 else np.nan
+
+    rank_corrs = []
+    for date, group in pred_df.groupby('date'):
+        if group[target_col].nunique() < 2: continue
+        rho, _ = spearmanr(group['pooled_pred'], group[target_col])
+        rank_corrs.append(rho)
+    avg_rank_corr = np.nanmean(rank_corrs)
+
+    summary_df = pd.DataFrame([{
+        'pooled_oor2': oor2,
+        'pooled_sharpe': sharpe,
+        'pooled_rank_corr': avg_rank_corr,
+        'pooled_decile_score_distance': np.mean(decile_returns)
+    }])
+    summary_df.to_csv(os.path.join(output_dir, "pooled_summary_metrics.csv"), index=False)
+
+    print("\nHuber version complete!")
+    print(f"Output saved to: {output_dir}")
+
+
+# Load the pooled DF
+
+pooled_df = load_pooled_data(DATA_DIR)
+
+
+# Run the model
+
+run_pooled_huber_full(pooled_df, feature_cols=PREDICTORS_BASE)
