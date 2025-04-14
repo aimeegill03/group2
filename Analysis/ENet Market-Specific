@@ -10,10 +10,13 @@ from scipy.stats import spearmanr
 from google.colab import drive
 drive.mount('/content/drive')
 
-DATA_PATH = '/content/drive/MyDrive/.../countries_cleaned'                    #Update this with the correct path to countries_cleaned
-RESULTS_PATH = '/content/drive/MyDrive/.../...'                               #Update this with the path to new folder
-target = 'excess_return_lead_winsorized'
-predictors = [
+# ====================== Configuration ======================
+DATA_PATH = '/content/drive/MyDrive/.../countries_cleaned'
+RESULTS_PATH = '/content/drive/MyDrive/.../'
+FACTOR_PATH = "/content/drive/MyDrive/.../countries_factors_gaps"
+TARGET = 'excess_return_lead_winsorized'
+
+PREDICTORS_BASE = [
     'me_z', 'absacc_z', 'acc_z', 'agr_z', 'bm_z', 'cash_ass_z', 'debt_ass_z', 'cfp_z', 'mom_6m_z', 'pm_z',
     'dolvol_z', 'dy_z', 'egr_z', 'ep_z', 'ill_z', 'mom_12m_z', 'lev_z', 'lgr_z', 'maxret_z', 'rev_1m_z',
     'mom_6m_lag_z', 'pctacc_z', 'retvol_z', 'roe_z', 'sgr_z', 'sales_z', 'price_z', 'turn_z',
@@ -21,34 +24,118 @@ predictors = [
     'stddolvol_z', 'stdturn_z', 'mvel1_z', 'sp_z'
 ]
 
-os.makedirs(RESULTS_PATH, exist_ok=True)
+AUGMENT_CONFIG = {
+    'use_us_factors': True,
+    'use_us_gaps': True,
+    'use_us_macro': False,
+    'use_local_factors': False,
+    'use_interactions_us_factors': True,
+    'use_interactions_us_gaps': True,
+    'use_interactions_local_factors': False
+}
 
 def r2_score(y_true, y_pred):
-    """Paper-compliant R² calculation (undemeaned)"""
     ss_res = np.sum((y_true - y_pred)**2)
     ss_tot = np.sum(y_true**2)
     return 1 - (ss_res / ss_tot) if ss_tot != 0 else np.nan
 
+def augment_predictors(df, country_code):
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
+    new_predictors = [col for col in PREDICTORS_BASE if col in df.columns]
+
+    missing_predictors = [col for col in PREDICTORS_BASE if col not in df.columns]
+    print(f"Country {country_code}: Missing {len(missing_predictors)} predictors: {missing_predictors}")
+
+    feature_counts = {
+        'base': len(new_predictors),
+        'us_factors': 0,
+        'us_gaps': 0,
+        'us_macro': 0,
+        'local_factors': 0,
+        'interactions': 0,
+    }
+
+    us_factors = pd.DataFrame()
+    us_gaps = pd.DataFrame()
+
+    if AUGMENT_CONFIG['use_us_factors']:
+        try:
+            print(f"⏳ Loading US factors...")
+            us_factors = pd.read_csv(os.path.join(FACTOR_PATH, "USA_factors.csv"), parse_dates=['date']).set_index('date')
+            df = df.join(us_factors, how='left')
+            new_predictors += list(us_factors.columns)
+            feature_counts['us_factors'] = len(us_factors.columns)
+            print(f"✅ US factors merged: {list(us_factors.columns)}")
+        except FileNotFoundError:
+            print(f"⚠ USA_factors.csv not found")
+
+    if AUGMENT_CONFIG['use_us_gaps'] and country_code != "USA":
+        try:
+            print(f"⏳ Loading US gaps...")
+            us_gaps = pd.read_csv(os.path.join(FACTOR_PATH, "USA_gaps.csv"), parse_dates=['date']).set_index('date')
+            df = df.join(us_gaps, how='left')
+            new_predictors += list(us_gaps.columns)
+            feature_counts['us_gaps'] = len(us_gaps.columns)
+            print(f"✅ US gaps merged: {list(us_gaps.columns)}")
+        except FileNotFoundError:
+            print(f"⚠ USA_gaps.csv not found")
+
+    char_cols = [col for col in new_predictors if col.endswith("_z")]
+    interaction_count = 0
+
+    # US factor interactions
+    if AUGMENT_CONFIG['use_interactions_us_factors'] and not us_factors.empty:
+        print(f"⏳ Creating interactions with US factors...")
+        for char in char_cols:
+            base = char.replace("_z", "")
+            factor_col = f"{base}_factor"
+            if factor_col in df.columns:
+                interaction_name = f"{char}_x_{factor_col}"
+                df[interaction_name] = df[char].fillna(0) * df[factor_col].fillna(0)
+                new_predictors.append(interaction_name)
+                interaction_count += 1
+            else:
+                print(f"❌ Missing US factor for base: {base} → expected column: {factor_col}")
+        print(f"✅ US factor interactions created")
+
+    # US gap interactions
+    if AUGMENT_CONFIG['use_interactions_us_gaps'] and not us_gaps.empty:
+        print(f"⏳ Creating interactions with US gaps...")
+        for char in char_cols:
+            base = char.replace("_z", "")
+            gap_col = f"{base}_gap"
+            if gap_col in df.columns:
+                interaction_name = f"{char}_x_{gap_col}"
+                df[interaction_name] = df[char].fillna(0) * df[gap_col].fillna(0)
+                new_predictors.append(interaction_name)
+                interaction_count += 1
+            else:
+                print(f"❌ Missing US gap for base: {base} → expected column: {gap_col}")
+        print(f"✅ US gap interactions created")
+
+    feature_counts['interactions'] = interaction_count
+
+    df.reset_index(inplace=True)
+    df[new_predictors] = df[new_predictors].fillna(0)
+    print(f"✅ Predictor augmentation complete — total predictors: {len(new_predictors)}")
+    print("\nFeature count summary:")
+    for k, v in feature_counts.items():
+        print(f"{k.title()}: {v}")
+    return df, new_predictors
+
+#---------------------------------------------------------------------
 def run_enet_expanding_window(df, predictors, target, country, output_dir,
                               initial_train_ratio=0.3, val_ratio=0.2,
                               param_grid={
-                                  'alpha': np.logspace(-3, 3, 20),
-                                  'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9],
+                                  'alpha': np.logspace(-3, 3, 10),
+                                  'l1_ratio': [0.25, 0.5, 0.75],
                               }):
-    print(f"Starting ElasticNet model for {country}...")
-
-    # Check available predictors
-    available_predictors = [col for col in predictors if col in df.columns]
-    if not available_predictors:
-        print(f"No predictors found for {country}, skipping...")
-        return
-
-    # Data preparation
     df = df.copy()
     df['date'] = pd.to_datetime(df['date'])
     df['year'] = df['date'].dt.year
-    df[available_predictors] = df[available_predictors].fillna(0)
-    df.dropna(subset=available_predictors + [target], inplace=True)
+    df.dropna(subset=predictors + [target], inplace=True)
     df = df.sort_values(by=['id', 'date'])
 
     years = sorted(df['year'].unique())
@@ -67,6 +154,9 @@ def run_enet_expanding_window(df, predictors, target, country, output_dir,
         val_end_year = years[test_start_idx - 1]
         test_year = years[test_start_idx]
 
+        print(f"\nProcessing year {test_year}...")
+        print(f"Train <= {train_end_year}, Val: {val_start_year}-{val_end_year}, Test = {test_year}")
+
         # Data splits
         train_data = df[df['year'] <= train_end_year]
         val_data = df[(df['year'] >= val_start_year) & (df['year'] <= val_end_year)]
@@ -76,13 +166,13 @@ def run_enet_expanding_window(df, predictors, target, country, output_dir,
             continue
 
         # Feature scaling
-        X_train = train_data[available_predictors].values
-        X_val = val_data[available_predictors].values
-        X_test = test_data[available_predictors].values
+        X_train = train_data[predictors].values
+        X_val = val_data[predictors].values
+        X_test = test_data[predictors].values
         y_train = train_data[target].values
         y_val = val_data[target].values
-        y_test = test_data[target].values 
-   
+        y_test = test_data[target].values
+
         # Hyperparameter tuning
         best_score = float('inf')
         best_params = None
@@ -166,12 +256,34 @@ def run_enet_expanding_window(df, predictors, target, country, output_dir,
 
     print(f"Finished processing {country}\n{'='*50}")
 
-# Process all country files
-csv_files = [f for f in os.listdir(DATA_PATH) if f.endswith('.csv')]
-for file in csv_files:
-    country_name = file.split('_')[0].upper()
-    print(f"\n{'='*50}\nProcessing {country_name}")
-    df = pd.read_csv(os.path.join(DATA_PATH, file))
-    run_enet_expanding_window(df, predictors, target, country_name, RESULTS_PATH)
 
-print("All countries processed!")
+# ====================== Main Execution ======================
+if __name__ == "__main__":
+    os.makedirs(RESULTS_PATH, exist_ok=True)
+
+    csv_files = [f for f in os.listdir(DATA_PATH) if f.endswith('.csv')]
+    for file in csv_files:
+        country_name = file.split('_')[0].upper()
+        print(f"\n{'='*50}\nProcessing {country_name}")
+
+        # Load and augment data
+        try:
+            df = pd.read_csv(os.path.join(DATA_PATH, file))
+            print(f"📄 Loaded data shape: {df.shape}")
+
+            df_aug, aug_predictors = augment_predictors(df, country_name)
+            print(f"Final predictor count: {len(aug_predictors)}")
+            print(f"🚀 Running Elastic Net for {country_name}...")
+
+            # Run model with augmented features
+            run_enet_expanding_window(
+                df=df_aug,
+                predictors=aug_predictors,
+                target=TARGET,
+                country=country_name,
+                output_dir=RESULTS_PATH
+            )
+        except Exception as e:
+            print(f"Failed processing {country_name}: {str(e)}")
+
+    print("All countries processed!")
