@@ -8,6 +8,14 @@ Jensen, T. I., Kelly, B., & Pedersen, L. H. (2023). Is there a replication crisi
 
 2- Analysis is a folder that contains the analysis in this mini-thesis. This includes the code for all models, with all variations used in the paper/what we adapted for our project.
 
+# Contributors
+The five contributors to this project are from group 2 of Data Science in Finance seminar, 2025, taught by Dr. Amar Soebhag. Our names follow:
+1) Shima Alimohammadipiraraei
+2) Joseph Barber
+3) Mingyang Ding
+4) Aimee Gill
+5) Anh Pham
+
 # Please note, we have provided all the code used in our project. We have created this code with all intents and purposes to recreate and extend the work from:
 Choi, D., Jiang, W., & Zhang, C. (2024). Alpha go everywhere: Machine learning and international stock returns. Available at SSRN 3489679.
 
