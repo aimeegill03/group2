@@ -1,1 +1,87 @@
+# Code which was used to actually call the cleaning pipeline for each country
+# Some import might be unnecessary within this file as they were used from a now-separated
+# batch of code, simply for visual and organisation purposes on GitHub.
 
+# Importing
+import os
+os.chdir(r'C:\Users\josep\Desktop\dsif_countries')
+print(os.listdir())
+import numpy as np
+import re
+import pandas as pd
+import glob
+from collections import defaultdict
+from cleaning_pipeline import run_cleaning_pipeline
+import wrds
+
+def clean_each_country_file(input_folder, output_folder,
+                            cleaning_function=run_cleaning_pipeline,
+                            delete_original=False,
+                            save_stats=True,
+                            stats_filename='dropped_stats.csv'):
+    """
+    Loads each country CSV, applies cleaning function, saves cleaned version,
+    and optionally deletes the original uncleaned file.
+
+    Parameters:
+    - input_folder: path to country_combined CSVs (e.g., 'IRL_combined.csv')
+    - output_folder: path to save cleaned versions
+    - cleaning_function: a function like run_cleaning_pipeline(df) -> (df_cleaned, stats)
+    - delete_original: if True, delete original uncleaned CSVs (default: False)
+    - save_stats: if True, save the aggregated stats table to a CSV
+    - stats_filename: filename to save the aggregated stats (default: 'dropped_stats.csv')
+
+    Returns:
+    - dropped_stats: pandas DataFrame summarizing row drop statistics for each country
+    """
+
+    os.makedirs(output_folder, exist_ok=True)
+    stats_list = []
+
+    # Loop over each country file
+    for filename in os.listdir(input_folder):
+        if filename.endswith(".csv"):
+            country = filename[:3]
+            filepath = os.path.join(input_folder, filename)
+            print(f"Reading {filename}...")
+
+            df = pd.read_csv(filepath)
+
+            print(f"Cleaning {country} data...")
+            df_cleaned, stats, current_columns = cleaning_function(df)
+
+            out_path = os.path.join(output_folder, f"{country}_cleaned.csv")
+            df_cleaned.to_csv(out_path, index=False)
+
+            print(f"Saved cleaned data for {country} ({df_cleaned.shape[0]} rows)")
+
+            # Append country name and stats for aggregation
+            stats['country'] = country
+            stats_list.append(stats)
+
+            if delete_original:
+                os.remove(filepath)
+                print(f"Deleted original file {filename}")
+
+    # Compile all stats into a summary table
+    dropped_stats = pd.DataFrame(stats_list).set_index('country')
+    print("\n=== Dropped Rows Summary ===")
+    print(dropped_stats)
+
+    if save_stats:
+        stats_out_path = os.path.join(output_folder, stats_filename)
+        dropped_stats.to_csv(stats_out_path)
+        print(f"\nSaved stats to {stats_out_path}")
+
+    print("\nAll country files cleaned and saved.")
+    if delete_original:
+        print("Original files were deleted.")
+
+    return dropped_stats, current_columns
+
+# Use:
+clean_each_country_file(
+    input_folder=r"C:\Users\josep\Desktop\dsif_countries\countries_combined",
+    output_folder=r"C:\Users\josep\Desktop\dsif_countries\countries_cleaned",
+    delete_original=True
+)
