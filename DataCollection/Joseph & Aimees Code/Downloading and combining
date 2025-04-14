@@ -1,3 +1,8 @@
+# Code used to actually call the downloading and combining of the raw data from wrds
+# Some imports might be unnecessary within this file as this code came from a now-
+# separated batch of code. It was separated simply for organisation and visual 
+# purposes on GitHub
+
 # Importing
 import os
 os.chdir(r'C:\Users\josep\Desktop\dsif_countries')
