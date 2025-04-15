@@ -7,10 +7,10 @@ from sklearn.metrics import mean_squared_error
 from scipy.stats import spearmanr
 
 # ===================== Local Paths =====================
-DATA_PATH = r'\Users\...\Downloads\countries_cleaned\countries_cleaned'
+DATA_PATH = r'\Users\607635ap\Downloads\countries_cleaned\countries_cleaned'
 print("✅ DATA_PATH points to:", DATA_PATH)
-RESULTS_PATH = r'\Users\...\Downloads\ENet_Model1'
-FACTOR_PATH = r'\Users\...\Downloads\countries_factors_gaps\countries_factors_gaps'
+RESULTS_PATH = r'\Users\607635ap\Downloads\ENet_Model1'
+FACTOR_PATH = r'\Users\607635ap\Downloads\countries_factors_gaps\countries_factors_gaps'
 
 TARGET = 'excess_return_lead_winsorized'
 
@@ -59,6 +59,7 @@ def prepare_pooled_data():
     return pooled_df
 
 def augment_pooled_predictors(pooled_df):
+    """Adapted augmentation from market-specific code"""
     df = pooled_df.copy()
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
@@ -134,6 +135,7 @@ def run_pooled_enet(df, predictors, target, output_dir,
                    val_ratio=0.2,
                    param_grid={'alpha': np.logspace(-3, 3, 10),
                                'l1_ratio': [0.25, 0.5, 0.75]}):
+    """Unified training function matching market-specific structure"""
     df = df.copy()
     df['year'] = df['date'].dt.year
     years = sorted(df['year'].unique())
@@ -192,27 +194,33 @@ def run_pooled_enet(df, predictors, target, output_dir,
         test_df['pred'] = y_pred
         results.append(test_df)
 
-        # Calculate metrics
+         # Replace the current metrics calculation section with:
         test_r2 = r2_score(y_test, y_pred)
         oos_r2_list.append(test_r2)
-        rho = spearmanr(y_test, y_pred)[0] if len(y_test) >= 2 else np.nan
 
-        # Portfolio returns
+        # Aligned Spearman calculation
+        if len(y_test) >= 2:
+            try:
+                rho = spearmanr(y_test, y_pred)[0]
+            except:
+                rho = np.nan
+                print(f"⚠️ Spearman calculation failed for {test_year}")
+        else:
+            rho = np.nan
+        rank_corrs.append(rho)
+
+        # Replace the portfolio returns section with:
         test_df = test_df.sort_values('pred')
         n = len(test_df)
         if n >= 10:
-            decile = n // 10
-            long_short = test_df.iloc[-decile:][target].mean() - test_df.iloc[:decile][target].mean()
-            long_short_returns.append(long_short)
-            decile_spreads.append(long_short)
-
-        metrics_list.append({
-            'year': test_year,
-            'r2': test_r2,
-            'spearman': rho,
-            'n_stocks': len(y_test)
-        })
-        print(f"Results: R²={test_r2:.3f}, Spearman={rho:.2f}, Stocks={len(y_test)}")
+            decile_size = n // 10
+            long_return = test_df.iloc[-decile_size:][target].mean()
+            short_return = test_df.iloc[:decile_size][target].mean()
+            spread = long_return - short_return
+            long_short_returns.append(spread)
+            decile_spreads.append(spread)
+        else:
+            print(f"⚠️ Only {n} stocks in {test_year} - skipping portfolio metrics")
 
     # Final outputs
     if results:
