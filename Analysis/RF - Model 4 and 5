@@ -22,7 +22,7 @@ def run_rf_expanding_window(df, predictors, target, country, output_dir,
                              initial_train_years=0.3, val_years=0.2, test_size=1,
                              param_grid={
                                  'max_depth': [3],
-                                 'max_features': [3],
+                                 'max_features': [6],
                                  'n_estimators': [300],
                              }):
 
