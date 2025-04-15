@@ -59,7 +59,6 @@ def prepare_pooled_data():
     return pooled_df
 
 def augment_pooled_predictors(pooled_df):
-    """Adapted augmentation from market-specific code"""
     df = pooled_df.copy()
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
@@ -135,7 +134,6 @@ def run_pooled_enet(df, predictors, target, output_dir,
                    val_ratio=0.2,
                    param_grid={'alpha': np.logspace(-3, 3, 10),
                                'l1_ratio': [0.25, 0.5, 0.75]}):
-    """Unified training function matching market-specific structure"""
     df = df.copy()
     df['year'] = df['date'].dt.year
     years = sorted(df['year'].unique())
