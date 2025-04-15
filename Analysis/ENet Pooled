@@ -1,0 +1,256 @@
+import os
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import ElasticNet
+from sklearn.model_selection import ParameterGrid
+from sklearn.metrics import mean_squared_error
+from scipy.stats import spearmanr
+
+# ===================== Local Paths =====================
+DATA_PATH = r'\Users\...\Downloads\countries_cleaned\countries_cleaned'
+print("✅ DATA_PATH points to:", DATA_PATH)
+RESULTS_PATH = r'\Users\...\Downloads\ENet_Model1'
+FACTOR_PATH = r'\Users\...\Downloads\countries_factors_gaps\countries_factors_gaps'
+
+TARGET = 'excess_return_lead_winsorized'
+
+
+PREDICTORS_BASE = [
+    'me_z', 'absacc_z', 'acc_z', 'agr_z', 'bm_z', 'cash_ass_z', 'debt_ass_z', 'cfp_z', 'mom_6m_z', 'pm_z',
+    'dolvol_z', 'dy_z', 'egr_z', 'ep_z', 'ill_z', 'mom_12m_z', 'lev_z', 'lgr_z', 'maxret_z', 'rev_1m_z',
+    'mom_6m_lag_z', 'pctacc_z', 'retvol_z', 'roe_z', 'sgr_z', 'sales_z', 'price_z', 'turn_z',
+    'cashdebt_z', 'chmom_6m_z', 'chpm_z', 'bm_ia_z', 'cfp_ia_z', 'mve_ia_z', 'chpm_ia_z', 'indmom_a_12m_z',
+    'stddolvol_z', 'stdturn_z', 'mvel1_z', 'sp_z'
+]
+
+AUGMENT_CONFIG = {
+    'use_us_factors': False,
+    'use_us_gaps': False,
+    'use_us_macro': False,
+    'use_local_factors': False,
+    'use_interactions_us_factors': False,
+    'use_interactions_us_gaps': False,
+    'use_interactions_local_factors': False
+}
+
+def r2_score(y_true, y_pred):
+    ss_res = np.sum((y_true - y_pred)**2)
+    ss_tot = np.sum(y_true**2)
+    return 1 - (ss_res / ss_tot) if ss_tot != 0 else np.nan
+
+def prepare_pooled_data():
+    """Load and prepare pooled dataset with country dummies"""
+    csv_files = [f for f in os.listdir(DATA_PATH) if f.endswith('.csv')]
+    dfs = []
+
+    for file in csv_files:
+        country = file.split('_')[0].upper()
+        df = pd.read_csv(os.path.join(DATA_PATH, file))
+        df['country'] = country
+        dfs.append(df)
+
+    pooled_df = pd.concat(dfs, ignore_index=True)
+    pooled_df['date'] = pd.to_datetime(pooled_df['date'])
+
+    # Add country dummies (exclude USA as reference)
+    country_dummies = pd.get_dummies(pooled_df['country'], prefix='ctry', drop_first=True)
+    pooled_df = pd.concat([pooled_df, country_dummies], axis=1)
+
+    return pooled_df
+
+def augment_pooled_predictors(pooled_df):
+    """Adapted augmentation from market-specific code"""
+    df = pooled_df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
+
+    new_predictors = PREDICTORS_BASE.copy()
+    feature_counts = {
+        'base': len(PREDICTORS_BASE),
+        'us_factors': 0,
+        'us_gaps': 0,
+        'interactions': 0
+    }
+
+    # Load US factors
+    us_factors = pd.DataFrame()
+    if AUGMENT_CONFIG['use_us_factors']:
+        try:
+            us_factors = pd.read_csv(os.path.join(FACTOR_PATH, "USA_factors.csv"),
+                                   parse_dates=['date']).set_index('date')
+            df = df.join(us_factors, how='left')
+            new_predictors += list(us_factors.columns)
+            feature_counts['us_factors'] = len(us_factors.columns)
+            print("✅ US factors merged")
+        except Exception as e:
+            print(f"⚠ US factors error: {str(e)}")
+
+    # Load US gaps (for non-US stocks)
+    us_gaps = pd.DataFrame()
+    if AUGMENT_CONFIG['use_us_gaps']:
+        try:
+            us_gaps = pd.read_csv(os.path.join(FACTOR_PATH, "USA_gaps.csv"),
+                                parse_dates=['date']).set_index('date')
+            df = df.join(us_gaps, how='left')
+            new_predictors += list(us_gaps.columns)
+            feature_counts['us_gaps'] = len(us_gaps.columns)
+            print("✅ US gaps merged")
+        except Exception as e:
+            print(f"⚠ US gaps error: {str(e)}")
+
+    # Create interactions
+    interactions = []
+    char_cols = [c for c in PREDICTORS_BASE if c.endswith('_z')]
+
+    if AUGMENT_CONFIG['use_interactions_us_factors']:
+        for factor in us_factors.columns:
+            base = factor.replace('_factor', '')
+            char = f"{base}_z"
+            if char in char_cols:
+                df[f"{char}_x_{factor}"] = df[char] * df[factor]
+                interactions.append(f"{char}_x_{factor}")
+
+    if AUGMENT_CONFIG['use_interactions_us_gaps']:
+        for gap in us_gaps.columns:
+            base = gap.replace('_gap', '')
+            char = f"{base}_z"
+            if char in char_cols:
+                df[f"{char}_x_{gap}"] = df[char] * df[gap] * (df['country'] != 'USA')
+                interactions.append(f"{char}_x_{gap}")
+
+    new_predictors += interactions
+    feature_counts['interactions'] = len(interactions)
+
+    # Final processing
+    df.reset_index(inplace=True)
+    df[new_predictors] = df[new_predictors].fillna(0)
+    print("\nFeature Summary:")
+    for k,v in feature_counts.items(): print(f"{k.title()}: {v}")
+    print(f"Total Predictors: {len(new_predictors)}")
+
+    return df, new_predictors
+
+def run_pooled_enet(df, predictors, target, output_dir,
+                   initial_train_ratio=0.3,
+                   val_ratio=0.2,
+                   param_grid={'alpha': np.logspace(-3, 3, 10),
+                               'l1_ratio': [0.25, 0.5, 0.75]}):
+    """Unified training function matching market-specific structure"""
+    df = df.copy()
+    df['year'] = df['date'].dt.year
+    years = sorted(df['year'].unique())
+
+    # Timeline setup
+    n_years = len(years)
+    train_size = int(n_years * initial_train_ratio)
+    val_size = max(1, int(n_years * val_ratio))
+
+    results = []
+    metrics_list = []
+    oos_r2_list = []
+    rank_corrs = []
+    long_short_returns = []
+    decile_spreads = []
+
+    for test_idx in range(train_size + val_size, n_years):
+        train_end = years[test_idx - val_size - 1]
+        val_start = years[test_idx - val_size]
+        test_year = years[test_idx]
+
+        print(f"\nProcessing {test_year}:")
+        print(f"Train <= {train_end}, Val={val_start}-{years[test_idx-1]}, Test={test_year}")
+
+        # Data splits
+        train_mask = df['year'] <= train_end
+        val_mask = df['year'].between(val_start, years[test_idx-1])
+        test_mask = df['year'] == test_year
+
+        X_train = df[train_mask][predictors].values
+        X_val = df[val_mask][predictors].values
+        X_test = df[test_mask][predictors].values
+        y_train = df[train_mask][target].values
+        y_val = df[val_mask][target].values
+        y_test = df[test_mask][target].values
+
+        # Hyperparameter tuning
+        best_score = float('inf')
+        best_params = None
+        best_model = None
+        for params in ParameterGrid(param_grid):
+            model = ElasticNet(**params, max_iter=10000)
+            model.fit(X_train, y_train)
+            y_val_pred = model.predict(X_val)
+            mse = mean_squared_error(y_val, y_val_pred)
+            if mse < best_score:
+                best_score, best_params, best_model = mse, params, model
+
+        # Retrain and predict
+        final_model = ElasticNet(**best_params, max_iter=10000)
+        final_model.fit(np.vstack([X_train, X_val]), np.hstack([y_train, y_val]))
+        y_pred = final_model.predict(X_test)
+
+        # Store results
+        test_df = df[test_mask][['date', 'country', target]].copy()
+        test_df['pred'] = y_pred
+        results.append(test_df)
+
+        # Calculate metrics
+        test_r2 = r2_score(y_test, y_pred)
+        oos_r2_list.append(test_r2)
+        rho = spearmanr(y_test, y_pred)[0] if len(y_test) >= 2 else np.nan
+
+        # Portfolio returns
+        test_df = test_df.sort_values('pred')
+        n = len(test_df)
+        if n >= 10:
+            decile = n // 10
+            long_short = test_df.iloc[-decile:][target].mean() - test_df.iloc[:decile][target].mean()
+            long_short_returns.append(long_short)
+            decile_spreads.append(long_short)
+
+        metrics_list.append({
+            'year': test_year,
+            'r2': test_r2,
+            'spearman': rho,
+            'n_stocks': len(y_test)
+        })
+        print(f"Results: R²={test_r2:.3f}, Spearman={rho:.2f}, Stocks={len(y_test)}")
+
+    # Final outputs
+    if results:
+        final_df = pd.concat(results)
+        final_df.to_csv(os.path.join(output_dir, 'pooled_predictions.csv'), index=False)
+
+        # Calculate summary metrics
+        sharpe_ratio = (np.mean(long_short_returns) / np.std(long_short_returns)) * np.sqrt(12)
+        summary_df = pd.DataFrame([{
+            'oos_r2': np.mean(oos_r2_list),
+            'sharpe_ratio': sharpe_ratio,
+            'avg_rank_correlation': np.nanmean(rank_corrs),
+            'avg_decile_spread': np.mean(decile_spreads)
+        }])
+        summary_df.to_csv(os.path.join(output_dir, 'pooled_summary.csv'), index=False)
+
+        pd.DataFrame(metrics_list).to_csv(os.path.join(output_dir, 'pooled_metrics.csv'), index=False)
+
+    print(f"\nCompleted processing {len(metrics_list)} test years")
+
+# ====================== Main Execution ======================
+if __name__ == "__main__":
+    os.makedirs(RESULTS_PATH, exist_ok=True)
+
+    # Prepare pooled data
+    print("Loading and augmenting pooled data...")
+    pooled_df = prepare_pooled_data()
+    df_aug, predictors = augment_pooled_predictors(pooled_df)
+
+    # Run model
+    print("\nStarting pooled model training...")
+    run_pooled_enet(
+        df=df_aug,
+        predictors=predictors,
+        target=TARGET,
+        output_dir=RESULTS_PATH
+    )
+
+    print("All processing completed!")
