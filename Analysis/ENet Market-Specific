@@ -7,13 +7,13 @@ from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import mean_squared_error
 from scipy.stats import spearmanr
 
-from google.colab import drive
-drive.mount('/content/drive')
 
 # ====================== Configuration ======================
-DATA_PATH = '/content/drive/MyDrive/.../countries_cleaned'
-RESULTS_PATH = '/content/drive/MyDrive/.../'
-FACTOR_PATH = "/content/drive/MyDrive/.../countries_factors_gaps"
+DATA_PATH = r'\Users\607635ap\Downloads\countries_cleaned\countries_cleaned'
+RESULTS_PATH = r'\Users\607635ap\Downloads\ENet_Model5'
+FACTOR_PATH = r'\Users\607635ap\Downloads\countries_factors_gaps\countries_factors_gaps'
+MACRO_PATH = r'\Users\607635ap\Downloads\US_macro_cleaned.csv'
+
 TARGET = 'excess_return_lead_winsorized'
 
 PREDICTORS_BASE = [
@@ -27,7 +27,7 @@ PREDICTORS_BASE = [
 AUGMENT_CONFIG = {
     'use_us_factors': True,
     'use_us_gaps': True,
-    'use_us_macro': False,
+    'use_us_macro': True,
     'use_local_factors': False,
     'use_interactions_us_factors': True,
     'use_interactions_us_gaps': True,
@@ -59,6 +59,7 @@ def augment_predictors(df, country_code):
 
     us_factors = pd.DataFrame()
     us_gaps = pd.DataFrame()
+    us_macro = pd.DataFrame()
 
     if AUGMENT_CONFIG['use_us_factors']:
         try:
@@ -81,6 +82,17 @@ def augment_predictors(df, country_code):
             print(f"✅ US gaps merged: {list(us_gaps.columns)}")
         except FileNotFoundError:
             print(f"⚠ USA_gaps.csv not found")
+
+    if AUGMENT_CONFIG['use_us_macro']:
+        try:
+            print(f"⏳ Loading US macro variables...")
+            us_macro = pd.read_csv(MACRO_PATH, parse_dates=['date']).set_index('date')  # Changed path handling
+            df = df.join(us_macro, how='left')
+            new_predictors += list(us_macro.columns)
+            feature_counts['us_macro'] = len(us_macro.columns)
+            print(f"✅ US macro variables merged: {list(us_macro.columns)}")
+        except FileNotFoundError:
+                print(f"⚠ US_macro_cleaned.csv not found")
 
     char_cols = [col for col in new_predictors if col.endswith("_z")]
     interaction_count = 0
