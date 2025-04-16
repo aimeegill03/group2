@@ -1,0 +1,55 @@
+import pandas as pd
+from pathlib import Path
+
+# Configure paths
+BASE_DIR = Path("/content/drive/MyDrive/Countries/cleaned/ENet_Results")
+COUNTRIES = ["AUS", "AUT", "BEL", "BRA", "CAN", "CHE", "CHL", "CHN", "DEU", "DNK",
+             "ESP", "FIN", "FRA", "GBR", "GRC", "HKG", "IDN", "IND", "ISR", "ITA", 
+             "JPN", "KOR", "KWT", "MEX", "MYS", "NLD", "NOR", "NZL", "PHL", "POL",
+             "RUS", "SAU", "SGP", "SWE",  "THA", "TUR", "TWN", "ZAF"]
+
+METRICS = ["oos_r2", "sharpe_ratio", "avg_rank_correlation", "avg_decile_score_distance"]
+
+def load_market_models():
+    """Load results for market models 3-5"""
+    market_models = [3, 4, 5]
+    results = []
+    
+    for country in COUNTRIES:
+        country_data = {'country': country}
+        
+        # Load data for each model
+        for model_num in market_models:
+            model_dir = BASE_DIR / f"ENet_Market_Model{model_num}"
+            fpath = model_dir / f"{country}_summary_metrics.csv"
+            
+            if fpath.exists():
+                try:
+                    df = pd.read_csv(fpath)
+                    # Add metrics with model-specific suffixes
+                    for metric in METRICS:
+                        col_name = f"{metric}_model{model_num}"
+                        country_data[col_name] = df[metric].values[0]  # Assuming one row per file
+                except Exception as e:
+                    print(f"Error processing {fpath}: {e}")
+                    # Mark missing data as NA
+                    for metric in METRICS:
+                        col_name = f"{metric}_model{model_num}"
+            else:
+                # Mark missing files as NA
+                for metric in METRICS:
+                    col_name = f"{metric}_model{model_num}"
+                    country_data[col_name] = pd.NA
+        
+        results.append(pd.DataFrame(country_data, index=[0]))
+    
+    return pd.concat(results, ignore_index=True)
+
+# Process and save results
+market_df = load_market_models()
+market_df.to_excel("Market_Models_Individual_Results.xlsx", index=False)
+
+print("Processing completed. File saved as Market_Models_Individual_Results.xlsx")
+
+from google.colab import files
+files.download('Market_Models_Individual_Results.xlsx')
