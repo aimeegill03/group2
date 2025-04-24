@@ -230,7 +230,12 @@ def run_pooled_global_model(use_tuned_lambda=True, estimator=1):
 
 
     # --------- THEN Add Country Fixed Effects via dummies ---------
-    df = pd.get_dummies(df, columns=['country'], drop_first=True)  # drop USA dummy
+    #df = pd.get_dummies(df, columns=['country'], drop_first=True)  # drop USA dummy
+    # Force 'USA' to be the reference country (always dropped)
+    unique_countries = sorted(df['country'].unique(), key=lambda x: (x != 'USA', x))
+    df['country'] = pd.Categorical(df['country'], categories=unique_countries, ordered=True)
+    df = pd.get_dummies(df, columns=['country'], drop_first=True)
+
     country_dummies = [col for col in df.columns if col.startswith("country_")]
     predictors = augmented_predictors + country_dummies
 
