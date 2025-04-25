@@ -33,3 +33,4 @@ The full expansion of the gridsearches used in the paper are _not_ detailed in o
 The code provided within this directory is open to see and use/mimic. If you have questions about anything within, please contact us through the following emails:
 1) aimeemgill@gmail.com
 2) josephbarber2001@gmail.com
+3) shima.alimo@outlook.com
