@@ -29,7 +29,6 @@ In total, this reduced model run-throughs (total number of models created, inclu
 The full expansion of the gridsearches used in the paper are _not_ detailed in our code within this directory but it is very easily extrapolated from it. See our paper for more details.
 
 # Disclaimers:
-ChatGPT was used throughout this project. Its use was limited, e.g., it was used pre-code to analyze and summarize, understand methodologies, reasons for using models or certain cleaning methods. Additionally, it was used to generate code snippets throughout, explain certain errors, or clarify complicated procedures. Its use was monitored, and filtered to ensure that the code output was true to what we wanted, and that we understood every output which we were individually tasked to create.
 
 The code provided within this directory is open to see and use/mimic. If you have questions about anything within, please contact us through the following emails:
 1) aimeemgill@gmail.com
